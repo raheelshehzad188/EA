@@ -3,7 +3,7 @@
 //|                        Professional Trend-Following Expert Advisor|
 //+------------------------------------------------------------------+
 #property copyright "Professional EA"
-#property version   "2.05"
+#property version   "2.06"
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
@@ -583,7 +583,7 @@ private:
    }
 
    bool IsZoneTouched(const ENUM_SIGNAL direction,
-                      CIndicatorManager *indicators) const
+                      const CIndicatorManager *indicators) const
    {
       double fastEma = 0.0;
       double atr     = 0.0;
@@ -606,7 +606,7 @@ private:
    }
 
    bool IsRSIMomentum(const ENUM_SIGNAL direction,
-                      CIndicatorManager *indicators) const
+                      const CIndicatorManager *indicators) const
    {
       double rsi1 = 0.0;
       double rsi2 = 0.0;
@@ -624,7 +624,7 @@ private:
    }
 
    bool IsCandleConfirmed(const ENUM_SIGNAL direction,
-                          CIndicatorManager *indicators) const
+                          const CIndicatorManager *indicators) const
    {
       if(!m_useCandleConfirm)
          return true;
@@ -646,7 +646,7 @@ private:
    }
 
    void UpdateConfirmFlags(const ENUM_SIGNAL direction,
-                           CIndicatorManager *indicators)
+                           const CIndicatorManager *indicators)
    {
       if(IsRSIMomentum(direction, indicators))
          m_rsiConfirmed = true;
@@ -701,25 +701,25 @@ public:
    int              GetBarsRemaining(void) const { return m_barsRemaining; }
 
    bool CheckPullback(const ENUM_SIGNAL direction,
-                      CIndicatorManager *indicators) const
+                      const CIndicatorManager *indicators) const
    {
       return (m_zoneTouched || IsZoneTouched(direction, indicators));
    }
 
    bool CheckRSIMomentum(const ENUM_SIGNAL direction,
-                         CIndicatorManager *indicators) const
+                         const CIndicatorManager *indicators) const
    {
       return (m_rsiConfirmed || IsRSIMomentum(direction, indicators));
    }
 
    bool CheckCandleConfirm(const ENUM_SIGNAL direction,
-                           CIndicatorManager *indicators) const
+                           const CIndicatorManager *indicators) const
    {
       return (m_candleConfirmed || IsCandleConfirmed(direction, indicators));
    }
 
    void LogPullbackDetail(const ENUM_SIGNAL direction,
-                          CIndicatorManager *indicators) const
+                          const CIndicatorManager *indicators) const
    {
       if(m_logger == NULL || indicators == NULL)
          return;
@@ -755,7 +755,7 @@ public:
    }
 
    void LogRSIDetail(const ENUM_SIGNAL direction,
-                     CIndicatorManager *indicators) const
+                     const CIndicatorManager *indicators) const
    {
       if(m_logger == NULL || indicators == NULL)
          return;
@@ -787,7 +787,7 @@ public:
    }
 
    void LogCandleDetail(const ENUM_SIGNAL direction,
-                        CIndicatorManager *indicators) const
+                        const CIndicatorManager *indicators) const
    {
       if(m_logger == NULL || indicators == NULL)
          return;
@@ -863,7 +863,7 @@ public:
       }
    }
 
-   ENUM_SIGNAL TryConfirmEntry(CIndicatorManager *indicators)
+   ENUM_SIGNAL TryConfirmEntry(const CIndicatorManager *indicators)
    {
       if(m_state == SETUP_NONE || indicators == NULL)
          return SIGNAL_NONE;
@@ -2675,7 +2675,7 @@ public:
       m_stats.Reset();
 
       m_logger.Init(InpLogLevel, "ProEA");
-      m_logger.Info("Initializing Expert Advisor v2.05...");
+      m_logger.Info("Initializing Expert Advisor v2.06...");
 
       if(!ValidateInputs())
          return false;
