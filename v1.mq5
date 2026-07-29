@@ -3,7 +3,7 @@
 //|                        Professional Trend-Following Expert Advisor|
 //+------------------------------------------------------------------+
 #property copyright "Professional EA"
-#property version   "2.00"
+#property version   "2.01"
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
@@ -140,6 +140,7 @@ input int            InpBreakEvenOffsetPoints = 5;         // Break-even offset 
 
 input group "=== Logging ==="
 input ENUM_LOG_LEVEL InpLogLevel           = LOG_LEVEL_INFO; // Log verbosity
+input bool           InpEnableDiagnostics  = true;         // Per-bar signal pipeline report
 
 //+------------------------------------------------------------------+
 //| CLogger - Centralized logging                                     |
@@ -174,6 +175,11 @@ public:
    {
       if(m_level >= LOG_LEVEL_DEBUG)
          Print(m_prefix, " [DEBUG] ", message);
+   }
+
+   void Diag(const string message) const
+   {
+      Print(m_prefix, " [DIAG]  ", message);
    }
 };
 
@@ -582,6 +588,139 @@ public:
    }
 
    ENUM_SETUP_STATE GetState(void) const { return m_state; }
+   int              GetBarsRemaining(void) const { return m_barsRemaining; }
+
+   bool CheckPullback(const ENUM_SIGNAL direction,
+                      CIndicatorManager *indicators) const
+   {
+      return IsPullbackToEMA(direction, indicators);
+   }
+
+   bool CheckRSICross(const ENUM_SIGNAL direction,
+                      CIndicatorManager *indicators) const
+   {
+      return IsRSIMomentumCross(direction, indicators);
+   }
+
+   bool CheckCandleConfirm(const ENUM_SIGNAL direction,
+                           CIndicatorManager *indicators) const
+   {
+      return IsCandleConfirmed(direction, indicators);
+   }
+
+   void LogPullbackDetail(const ENUM_SIGNAL direction,
+                          CIndicatorManager *indicators) const
+   {
+      if(m_logger == NULL || indicators == NULL)
+         return;
+
+      double fastEma = 0.0;
+      double atr     = 0.0;
+      double low1 = 0.0, high1 = 0.0, open1 = 0.0, close1 = 0.0;
+
+      if(!indicators.GetFastEMA(fastEma, 1) ||
+         !indicators.GetATR(atr, 1) ||
+         !indicators.GetBarOHLC(1, open1, high1, low1, close1))
+      {
+         m_logger.Diag("Pullback detail: indicator/OHLC data unavailable.");
+         return;
+      }
+
+      const double zone = m_pullbackAtrZone * atr;
+
+      if(direction == SIGNAL_BUY)
+      {
+         const bool touchedZone = (low1 <= fastEma + zone);
+         const bool closedAbove = (close1 > fastEma);
+         m_logger.Diag(StringFormat("Pullback BUY detail | Low=%.5f EMA=%.5f ZoneTop=%.5f Close=%.5f | touched=%s closedAbove=%s",
+                                    low1, fastEma, fastEma + zone, close1,
+                                    (touchedZone ? "TRUE" : "FALSE"),
+                                    (closedAbove ? "TRUE" : "FALSE")));
+      }
+      else if(direction == SIGNAL_SELL)
+      {
+         const bool touchedZone = (high1 >= fastEma - zone);
+         const bool closedBelow = (close1 < fastEma);
+         m_logger.Diag(StringFormat("Pullback SELL detail | High=%.5f EMA=%.5f ZoneBot=%.5f Close=%.5f | touched=%s closedBelow=%s",
+                                    high1, fastEma, fastEma - zone, close1,
+                                    (touchedZone ? "TRUE" : "FALSE"),
+                                    (closedBelow ? "TRUE" : "FALSE")));
+      }
+   }
+
+   void LogRSIDetail(const ENUM_SIGNAL direction,
+                     CIndicatorManager *indicators) const
+   {
+      if(m_logger == NULL || indicators == NULL)
+         return;
+
+      double rsi1 = 0.0;
+      double rsi2 = 0.0;
+      if(!indicators.GetRSI(rsi1, 1) || !indicators.GetRSI(rsi2, 2))
+      {
+         m_logger.Diag("RSI detail: data unavailable.");
+         return;
+      }
+
+      if(direction == SIGNAL_BUY)
+      {
+         const bool crossUp = (rsi2 <= m_rsiCrossLevel && rsi1 > m_rsiCrossLevel && rsi1 > rsi2);
+         m_logger.Diag(StringFormat("RSI BUY detail | RSI[1]=%.2f RSI[2]=%.2f Level=%.2f | crossUp=%s rising=%s",
+                                    rsi1, rsi2, m_rsiCrossLevel,
+                                    (crossUp ? "TRUE" : "FALSE"),
+                                    (rsi1 > rsi2 ? "TRUE" : "FALSE")));
+      }
+      else if(direction == SIGNAL_SELL)
+      {
+         const bool crossDn = (rsi2 >= m_rsiCrossLevel && rsi1 < m_rsiCrossLevel && rsi1 < rsi2);
+         m_logger.Diag(StringFormat("RSI SELL detail | RSI[1]=%.2f RSI[2]=%.2f Level=%.2f | crossDn=%s falling=%s",
+                                    rsi1, rsi2, m_rsiCrossLevel,
+                                    (crossDn ? "TRUE" : "FALSE"),
+                                    (rsi1 < rsi2 ? "TRUE" : "FALSE")));
+      }
+   }
+
+   void LogCandleDetail(const ENUM_SIGNAL direction,
+                        CIndicatorManager *indicators) const
+   {
+      if(m_logger == NULL || indicators == NULL)
+         return;
+
+      if(!m_useCandleConfirm)
+      {
+         m_logger.Diag("Candle detail: confirmation disabled by input.");
+         return;
+      }
+
+      double open1 = 0.0, high1 = 0.0, low1 = 0.0, close1 = 0.0;
+      double open2 = 0.0, high2 = 0.0, low2 = 0.0, close2 = 0.0;
+
+      if(!indicators.GetBarOHLC(1, open1, high1, low1, close1) ||
+         !indicators.GetBarOHLC(2, open2, high2, low2, close2))
+      {
+         m_logger.Diag("Candle detail: OHLC data unavailable.");
+         return;
+      }
+
+      if(direction == SIGNAL_BUY)
+      {
+         const bool bullishBody = (close1 > open1);
+         const bool breaksPrior = (close1 > high2);
+         m_logger.Diag(StringFormat("Candle BUY detail | O=%.5f H=%.5f L=%.5f C=%.5f PriorHigh=%.5f | bullish=%s breakPrior=%s",
+                                    open1, high1, low1, close1, high2,
+                                    (bullishBody ? "TRUE" : "FALSE"),
+                                    (breaksPrior ? "TRUE" : "FALSE")));
+      }
+      else if(direction == SIGNAL_SELL)
+      {
+         const bool bearishBody = (close1 < open1);
+         const bool breaksPrior = (close1 < low2);
+         m_logger.Diag(StringFormat("Candle SELL detail | O=%.5f H=%.5f L=%.5f C=%.5f PriorLow=%.5f | bearish=%s breakPrior=%s",
+                                    open1, high1, low1, close1, low2,
+                                    (bearishBody ? "TRUE" : "FALSE"),
+                                    (breaksPrior ? "TRUE" : "FALSE")));
+      }
+   }
 
    void ArmSetup(const ENUM_SIGNAL direction)
    {
@@ -972,6 +1111,378 @@ public:
          return (IsHTFBearish() && PassesLTFTrend(SIGNAL_SELL));
 
       return false;
+   }
+
+   // --- Diagnostic accessors (read-only, no strategy change) ---
+   bool DiagBOS(const ENUM_SIGNAL direction) const
+   {
+      if(m_structure == NULL)
+         return false;
+      if(direction == SIGNAL_BUY)
+         return m_structure.IsBullishBOS();
+      if(direction == SIGNAL_SELL)
+         return m_structure.IsBearishBOS();
+      return false;
+   }
+
+   bool DiagHTFTrend(const ENUM_SIGNAL direction) const
+   {
+      if(direction == SIGNAL_BUY)
+         return IsHTFBullish();
+      if(direction == SIGNAL_SELL)
+         return IsHTFBearish();
+      return false;
+   }
+
+   bool DiagLTFTrend(const ENUM_SIGNAL direction) const
+   {
+      return PassesLTFTrend(direction);
+   }
+
+   bool DiagADXFilter(void) const
+   {
+      double adx = 0.0;
+      return PassesDynamicADX(adx);
+   }
+
+   bool DiagATRFilter(void) const
+   {
+      return PassesATRVolatilityFilter();
+   }
+
+   bool DiagRangeFilter(void) const
+   {
+      return !IsRangingMarket();
+   }
+
+   bool DiagCoreFilters(void) const
+   {
+      return PassesCoreFilters();
+   }
+
+   bool DiagValidateArmed(const ENUM_SIGNAL direction) const
+   {
+      return ValidateArmedSetup(direction);
+   }
+
+   void LogADXDetail(void) const
+   {
+      if(m_logger == NULL || m_indicators == NULL)
+         return;
+
+      double adx1 = 0.0;
+      double adx2 = 0.0;
+      double adxAvg = 0.0;
+
+      if(!m_indicators.GetADX(adx1, 1) || !m_indicators.GetADX(adx2, 2))
+      {
+         m_logger.Diag("ADX detail: data unavailable.");
+         return;
+      }
+
+      double threshold = m_adxMin;
+      if(m_useDynamicAdx)
+      {
+         if(m_indicators.GetADXAverage(m_adxAvgPeriod, adxAvg))
+            threshold = MathMax(m_adxMin, adxAvg * 0.90);
+      }
+
+      m_logger.Diag(StringFormat("ADX detail | ADX[1]=%.2f ADX[2]=%.2f Threshold=%.2f Avg=%.2f | above=%s rising=%s",
+                                 adx1, adx2, threshold, adxAvg,
+                                 (adx1 >= threshold ? "TRUE" : "FALSE"),
+                                 ((!m_requireAdxRising || adx1 > adx2) ? "TRUE" : "FALSE")));
+   }
+
+   void LogATRDetail(void) const
+   {
+      if(m_logger == NULL || m_indicators == NULL)
+         return;
+
+      double atr1 = 0.0;
+      double atrAvg = 0.0;
+      if(!m_indicators.GetATR(atr1, 1) || !m_indicators.GetATRAverage(m_atrAvgPeriod, atrAvg))
+      {
+         m_logger.Diag("ATR detail: data unavailable.");
+         return;
+      }
+
+      m_logger.Diag(StringFormat("ATR detail | ATR[1]=%.5f Avg=%.5f Min=%.5f Max=%.5f | inRange=%s",
+                                 atr1, atrAvg,
+                                 atrAvg * m_atrMinRatio, atrAvg * m_atrMaxRatio,
+                                 (DiagATRFilter() ? "TRUE" : "FALSE")));
+   }
+
+   void LogRangeDetail(void) const
+   {
+      if(m_logger == NULL || m_indicators == NULL)
+         return;
+
+      double fastEma = 0.0;
+      double slowEma = 0.0;
+      double atr     = 0.0;
+      double adx1    = 0.0;
+
+      if(!m_indicators.GetFastEMA(fastEma, 1) ||
+         !m_indicators.GetSlowEMA(slowEma, 1) ||
+         !m_indicators.GetATR(atr, 1) ||
+         !m_indicators.GetADX(adx1, 1))
+      {
+         m_logger.Diag("Range detail: data unavailable.");
+         return;
+      }
+
+      const double emaSep = (atr > 0.0 ? MathAbs(fastEma - slowEma) / atr : 0.0);
+      m_logger.Diag(StringFormat("Range detail | EMAsep/ATR=%.3f Min=%.3f ADX[1]=%.2f | trending=%s",
+                                 emaSep, m_minEmaSepAtr, adx1,
+                                 (DiagRangeFilter() ? "TRUE" : "FALSE")));
+   }
+
+   void LogLTFTrendDetail(const ENUM_SIGNAL direction) const
+   {
+      if(m_logger == NULL || m_indicators == NULL)
+         return;
+
+      double fastEma = 0.0;
+      double slowEma = 0.0;
+      double plusDi  = 0.0;
+      double minusDi = 0.0;
+
+      if(!m_indicators.GetFastEMA(fastEma, 1) ||
+         !m_indicators.GetSlowEMA(slowEma, 1) ||
+         !m_indicators.GetPlusDI(plusDi, 1) ||
+         !m_indicators.GetMinusDI(minusDi, 1))
+      {
+         m_logger.Diag("LTF trend detail: data unavailable.");
+         return;
+      }
+
+      m_logger.Diag(StringFormat("LTF detail | EMA50=%.5f EMA200=%.5f +DI=%.2f -DI=%.2f | dirOK=%s",
+                                 fastEma, slowEma, plusDi, minusDi,
+                                 (DiagLTFTrend(direction) ? "TRUE" : "FALSE")));
+   }
+
+   void LogHTFTrendDetail(const ENUM_SIGNAL direction) const
+   {
+      if(m_logger == NULL || m_indicators == NULL)
+         return;
+
+      double htfFast = 0.0;
+      double htfSlow = 0.0;
+      if(!m_indicators.GetHTFFastEMA(htfFast, 1) || !m_indicators.GetHTFSlowEMA(htfSlow, 1))
+      {
+         m_logger.Diag("HTF trend detail: data unavailable.");
+         return;
+      }
+
+      m_logger.Diag(StringFormat("HTF detail | Fast=%.5f Slow=%.5f | dirOK=%s",
+                                 htfFast, htfSlow,
+                                 (DiagHTFTrend(direction) ? "TRUE" : "FALSE")));
+   }
+};
+
+//+------------------------------------------------------------------+
+//| CSignalDiagnostics - Per-bar pipeline report                      |
+//+------------------------------------------------------------------+
+class CSignalDiagnostics
+{
+private:
+   CLogger               *m_logger;
+   CIndicatorManager     *m_indicators;
+   CMarketStructure      *m_structure;
+   CSignalEngine         *m_signals;
+   CPullbackEntryManager *m_pullback;
+   CFilterManager        *m_filters;
+   string                 m_symbol;
+   ENUM_TIMEFRAMES        m_timeframe;
+   bool                   m_enabled;
+
+   string BoolStr(const bool value) const
+   {
+      return value ? "TRUE" : "FALSE";
+   }
+
+   string DirectionStr(const ENUM_SIGNAL direction) const
+   {
+      if(direction == SIGNAL_BUY)  return "BUY";
+      if(direction == SIGNAL_SELL) return "SELL";
+      return "NONE";
+   }
+
+   void AppendBlocker(string &blockers, const string name, const bool passed) const
+   {
+      if(passed)
+         return;
+      if(blockers != "")
+         blockers += ", ";
+      blockers += name;
+   }
+
+   void PrintDirectionReport(const ENUM_SIGNAL direction,
+                             const string mode,
+                             const int barsRemaining) const
+   {
+      if(m_logger == NULL || m_signals == NULL || m_pullback == NULL || m_indicators == NULL)
+         return;
+
+      const bool bos           = m_signals.DiagBOS(direction);
+      const bool htfTrend      = m_signals.DiagHTFTrend(direction);
+      const bool ltfTrend      = m_signals.DiagLTFTrend(direction);
+      const bool adx           = m_signals.DiagADXFilter();
+      const bool atrFilter     = m_signals.DiagATRFilter();
+      const bool rangeFilter   = m_signals.DiagRangeFilter();
+      const bool coreFilters   = m_signals.DiagCoreFilters();
+      const bool armedValid    = m_signals.DiagValidateArmed(direction);
+      const bool pullback      = m_pullback.CheckPullback(direction, m_indicators);
+      const bool rsiCross      = m_pullback.CheckRSICross(direction, m_indicators);
+      const bool candleConfirm = m_pullback.CheckCandleConfirm(direction, m_indicators);
+
+      const datetime barTime = iTime(m_symbol, m_timeframe, 1);
+      string header = StringFormat("=== Bar %s | Mode=%s | Dir=%s",
+                                   TimeToString(barTime, TIME_DATE | TIME_MINUTES),
+                                   mode, DirectionStr(direction));
+      if(barsRemaining > 0)
+         header += StringFormat(" | BarsLeft=%d", barsRemaining);
+
+      m_logger.Diag(header);
+      m_logger.Diag(StringFormat("BOS                 = %s", BoolStr(bos)));
+      m_logger.Diag(StringFormat("HTF Trend           = %s", BoolStr(htfTrend)));
+      m_logger.Diag(StringFormat("LTF Trend           = %s", BoolStr(ltfTrend)));
+      m_logger.Diag(StringFormat("ADX                 = %s", BoolStr(adx)));
+      m_logger.Diag(StringFormat("ATR Filter          = %s", BoolStr(atrFilter)));
+      m_logger.Diag(StringFormat("Pullback            = %s", BoolStr(pullback)));
+      m_logger.Diag(StringFormat("RSI Cross           = %s", BoolStr(rsiCross)));
+      m_logger.Diag(StringFormat("Candle Confirmation = %s", BoolStr(candleConfirm)));
+      m_logger.Diag(StringFormat("Range Filter        = %s", BoolStr(rangeFilter)));
+      m_logger.Diag(StringFormat("Core Filters        = %s", BoolStr(coreFilters)));
+      m_logger.Diag(StringFormat("Armed Validation    = %s", BoolStr(armedValid)));
+
+      string blockers = "";
+      if(StringCompare(mode, "SETUP_SCAN") == 0)
+      {
+         AppendBlocker(blockers, "BOS", bos);
+         AppendBlocker(blockers, "HTF Trend", htfTrend);
+         AppendBlocker(blockers, "LTF Trend", ltfTrend);
+         AppendBlocker(blockers, "ADX", adx);
+         AppendBlocker(blockers, "ATR Filter", atrFilter);
+         AppendBlocker(blockers, "Range Filter", rangeFilter);
+      }
+      else
+      {
+         AppendBlocker(blockers, "Armed Validation", armedValid);
+         AppendBlocker(blockers, "Pullback", pullback);
+         AppendBlocker(blockers, "RSI Cross", rsiCross);
+         AppendBlocker(blockers, "Candle Confirmation", candleConfirm);
+      }
+
+      if(blockers == "")
+         m_logger.Diag("BLOCKERS: none (all checked conditions passed)");
+      else
+         m_logger.Diag("BLOCKERS: " + blockers);
+
+      if(!bos && StringCompare(mode, "SETUP_SCAN") == 0)
+         m_logger.Diag("FAIL: BOS not present for " + DirectionStr(direction) + " setup.");
+      if(!htfTrend)
+      {
+         m_logger.Diag("FAIL: HTF trend not aligned.");
+         m_signals.LogHTFTrendDetail(direction);
+      }
+      if(!ltfTrend)
+      {
+         m_logger.Diag("FAIL: LTF trend not aligned.");
+         m_signals.LogLTFTrendDetail(direction);
+      }
+      if(!adx)
+      {
+         m_logger.Diag("FAIL: ADX filter not passed.");
+         m_signals.LogADXDetail();
+      }
+      if(!atrFilter)
+      {
+         m_logger.Diag("FAIL: ATR volatility filter not passed.");
+         m_signals.LogATRDetail();
+      }
+      if(!rangeFilter)
+      {
+         m_logger.Diag("FAIL: Range filter flagged choppy/ranging market.");
+         m_signals.LogRangeDetail();
+      }
+      if(StringCompare(mode, "ENTRY_CONFIRM") == 0)
+      {
+         if(!armedValid)
+            m_logger.Diag("FAIL: Armed setup invalidated (core + HTF + LTF no longer aligned).");
+         if(!pullback)
+         {
+            m_logger.Diag("FAIL: Pullback to EMA zone not complete.");
+            m_pullback.LogPullbackDetail(direction, m_indicators);
+         }
+         if(!rsiCross)
+         {
+            m_logger.Diag("FAIL: RSI momentum cross not detected.");
+            m_pullback.LogRSIDetail(direction, m_indicators);
+         }
+         if(!candleConfirm)
+         {
+            m_logger.Diag("FAIL: Candle confirmation not met.");
+            m_pullback.LogCandleDetail(direction, m_indicators);
+         }
+      }
+   }
+
+public:
+   CSignalDiagnostics(void) :
+      m_logger(NULL),
+      m_indicators(NULL),
+      m_structure(NULL),
+      m_signals(NULL),
+      m_pullback(NULL),
+      m_filters(NULL),
+      m_symbol(""),
+      m_timeframe(PERIOD_CURRENT),
+      m_enabled(true)
+   {}
+
+   void Init(CLogger *logger, CIndicatorManager *indicators, CMarketStructure *structure,
+             CSignalEngine *signals, CPullbackEntryManager *pullback,
+             CFilterManager *filters, const string symbol,
+             const ENUM_TIMEFRAMES timeframe, const bool enabled)
+   {
+      m_logger     = logger;
+      m_indicators = indicators;
+      m_structure  = structure;
+      m_signals    = signals;
+      m_pullback   = pullback;
+      m_filters    = filters;
+      m_symbol     = symbol;
+      m_timeframe  = timeframe;
+      m_enabled    = enabled;
+   }
+
+   void PrintBarReport(const ENUM_SETUP_STATE setupState,
+                       const ENUM_SIGNAL armedDirection) const
+   {
+      if(!m_enabled || m_logger == NULL)
+         return;
+
+      if(m_filters != NULL)
+      {
+         const bool spreadOk  = m_filters.IsSpreadAcceptable();
+         const bool sessionOk = m_filters.IsWithinSession();
+         m_logger.Diag(StringFormat("Pre-filters | Spread=%s Session=%s",
+                                    BoolStr(spreadOk), BoolStr(sessionOk)));
+         if(!spreadOk)
+            m_logger.Diag("FAIL: Spread filter blocked entry evaluation.");
+         if(!sessionOk)
+            m_logger.Diag("FAIL: Session filter blocked entry evaluation.");
+      }
+
+      if(setupState != SETUP_NONE && armedDirection != SIGNAL_NONE)
+      {
+         PrintDirectionReport(armedDirection, "ENTRY_CONFIRM", m_pullback.GetBarsRemaining());
+         return;
+      }
+
+      PrintDirectionReport(SIGNAL_BUY,  "SETUP_SCAN", 0);
+      PrintDirectionReport(SIGNAL_SELL, "SETUP_SCAN", 0);
    }
 };
 
@@ -1635,6 +2146,7 @@ private:
    CSignalEngine         m_signals;
    CPullbackEntryManager m_pullback;
    CExitManager          m_exits;
+   CSignalDiagnostics    m_diagnostics;
    CRiskManager          m_risk;
    CFilterManager        m_filters;
    CPositionManager      m_positions;
@@ -1779,6 +2291,11 @@ public:
          return false;
       }
 
+      m_diagnostics.Init(GetPointer(m_logger), GetPointer(m_indicators),
+                         GetPointer(m_structure), GetPointer(m_signals),
+                         GetPointer(m_pullback), GetPointer(m_filters),
+                         m_symbol, m_timeframe, InpEnableDiagnostics);
+
       m_risk.Init(GetPointer(m_logger), InpLotMode, InpFixedLot, InpRiskPercent);
       if(!m_risk.RefreshSymbol(m_symbol))
       {
@@ -1847,6 +2364,9 @@ public:
 
       m_logger.Debug("New bar - evaluating pullback and setup conditions.");
 
+      // --- Per-bar diagnostic (always, before pipeline gates) ---
+      m_diagnostics.PrintBarReport(m_pullback.GetState(), GetArmedDirection());
+
       if(m_positions.HasOpenPosition())
       {
          m_logger.Debug("Entry skipped: position already open for this symbol.");
@@ -1892,6 +2412,8 @@ public:
 
       if(signal == SIGNAL_NONE)
          return;
+
+      m_logger.Info(StringFormat("TRADE OPENING | Direction=%s", (signal == SIGNAL_BUY ? "BUY" : "SELL")));
 
       if(!m_indicators.GetATR(atrValue) || atrValue <= 0.0)
       {
