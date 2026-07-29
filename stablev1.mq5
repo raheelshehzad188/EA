@@ -153,6 +153,7 @@ input group "=== Logging ==="
 input ENUM_LOG_LEVEL InpLogLevel           = LOG_LEVEL_INFO; // Log verbosity
 input bool           InpEnableDiagnostics  = true;         // Per-bar signal pipeline report
 input bool           InpEnablePipelineLog    = true;         // [PASS/FAIL] entry pipeline instrumentation
+input bool           InpEnableStrategyAudit  = false;        // Strategy audit mode (per-trade detail log)
 
 //+------------------------------------------------------------------+
 //| SSettings - Central configuration snapshot                        |
@@ -208,6 +209,7 @@ struct SSettings
    ENUM_LOG_LEVEL    logLevel;
    bool              enableDiagnostics;
    bool              enablePipelineLog;
+   bool              enableStrategyAudit;
    double            rangeAdxTier1;
    double            rangeAdxTier2;
    double            rangeEmaSepTier1;
@@ -258,6 +260,11 @@ public:
    void Pipe(const string message) const
    {
       Print(m_prefix, " [PIPE]  ", message);
+   }
+
+   void Audit(const string message) const
+   {
+      Print(m_prefix, " [AUDIT] ", message);
    }
 };
 
@@ -355,6 +362,7 @@ public:
       m_settings.logLevel               = InpLogLevel;
       m_settings.enableDiagnostics      = InpEnableDiagnostics;
       m_settings.enablePipelineLog      = InpEnablePipelineLog;
+      m_settings.enableStrategyAudit    = InpEnableStrategyAudit;
       m_settings.rangeAdxTier1          = 35.0;
       m_settings.rangeAdxTier2          = 25.0;
       m_settings.rangeEmaSepTier1       = 0.20;
@@ -464,6 +472,7 @@ public:
 
    bool EnablePipelineLog(void) const { return m_settings.enablePipelineLog; }
    bool EnableDiagnostics(void) const { return m_settings.enableDiagnostics; }
+   bool EnableStrategyAudit(void) const { return m_settings.enableStrategyAudit; }
    double SlAtrMultiplier(void) const { return m_settings.slAtrMultiplier; }
 
    void PrintStartupConfig(CLogger *logger, const string symbol,
@@ -1687,6 +1696,7 @@ private:
    bool              m_useStructureExit;
    bool              m_useRsiExit;
    bool              m_useOppositeBosExit;
+   string            m_lastExitReason;
 
    bool HasOurPosition(ulong &ticket, ENUM_POSITION_TYPE &type) const
    {
@@ -1738,7 +1748,8 @@ public:
       m_rsiCrossLevel(50.0),
       m_useStructureExit(true),
       m_useRsiExit(true),
-      m_useOppositeBosExit(true)
+      m_useOppositeBosExit(true),
+      m_lastExitReason("")
    {}
 
    void Init(CLogger *logger, const SSettings &settings,
@@ -1765,6 +1776,8 @@ public:
       m_trade.SetTypeFilling(GetFillingMode(symbol));
       return true;
    }
+
+   string GetLastExitReason(void) const { return m_lastExitReason; }
 
    bool CheckAndExit(void)
    {
@@ -1797,6 +1810,8 @@ public:
 
       if(reason == "")
          return false;
+
+      m_lastExitReason = reason;
 
       if(!m_trade.PositionClose(ticket))
       {
@@ -2541,6 +2556,295 @@ struct SDirectionChecks
 };
 
 //+------------------------------------------------------------------+
+//| STradeAuditEntry - Snapshot captured at trade entry               |
+//+------------------------------------------------------------------+
+struct STradeAuditEntry
+{
+   int            tradeNumber;
+   ENUM_SIGNAL    direction;
+   datetime       entryTime;
+   datetime       entryBarTime;
+   double         entryPrice;
+   bool           bosPass;
+   bool           htfPass;
+   bool           ltfPass;
+   double         adxValue;
+   double         atrValue;
+   double         emaSeparation;
+   double         rsiValue;
+   double         pullbackDistance;
+   bool           candleConfirm;
+   double         stopLoss;
+   double         takeProfit;
+   double         slDistance;
+   double         lotSize;
+   ulong          positionId;
+};
+
+//+------------------------------------------------------------------+
+//| CStrategyAudit - Per-trade entry/exit audit logging               |
+//+------------------------------------------------------------------+
+class CStrategyAudit
+{
+private:
+   bool              m_enabled;
+   CLogger          *m_logger;
+   CExitManager     *m_exits;
+   string            m_symbol;
+   ENUM_TIMEFRAMES   m_timeframe;
+   ulong             m_magic;
+   int               m_tradeCount;
+   bool              m_hasActive;
+   STradeAuditEntry  m_active;
+
+   string PassFailLabel(const bool passed) const
+   {
+      return passed ? "PASS" : "FAIL";
+   }
+
+   string DealReasonLabel(const ENUM_DEAL_REASON reason) const
+   {
+      switch(reason)
+      {
+         case DEAL_REASON_SL:     return "Stop Loss";
+         case DEAL_REASON_TP:     return "Take Profit";
+         case DEAL_REASON_SO:     return "Stop Out";
+         case DEAL_REASON_CLIENT: return "Client";
+         case DEAL_REASON_MOBILE: return "Mobile";
+         case DEAL_REASON_WEB:    return "Web";
+         case DEAL_REASON_EXPERT:
+            if(m_exits != NULL && m_exits.GetLastExitReason() != "")
+               return m_exits.GetLastExitReason();
+            return "Expert exit";
+         default:                 return "Unknown";
+      }
+   }
+
+   static double ComputePullbackDistance(const ENUM_SIGNAL direction,
+                                         const CIndicatorManager *indicators)
+   {
+      if(indicators == NULL)
+         return 0.0;
+
+      double fastEma = 0.0;
+      double atr     = 0.0;
+      double open1 = 0.0, high1 = 0.0, low1 = 0.0, close1 = 0.0;
+
+      if(!indicators.GetFastEMA(fastEma, 1) ||
+         !indicators.GetATR(atr, 1) ||
+         !indicators.GetBarOHLC(1, open1, high1, low1, close1) ||
+         atr <= 0.0)
+         return 0.0;
+
+      if(direction == SIGNAL_BUY)
+         return MathAbs(low1 - fastEma) / atr;
+
+      if(direction == SIGNAL_SELL)
+         return MathAbs(high1 - fastEma) / atr;
+
+      return 0.0;
+   }
+
+   static double ComputeEmaSeparation(const CIndicatorManager *indicators)
+   {
+      double fastEma = 0.0;
+      double slowEma = 0.0;
+      double atr     = 0.0;
+
+      if(indicators == NULL ||
+         !indicators.GetFastEMA(fastEma, 1) ||
+         !indicators.GetSlowEMA(slowEma, 1) ||
+         !indicators.GetATR(atr, 1) ||
+         atr <= 0.0)
+         return 0.0;
+
+      return MathAbs(fastEma - slowEma) / atr;
+   }
+
+   int CountHoldingBars(const datetime entryTime) const
+   {
+      if(entryTime <= 0)
+         return 0;
+
+      const int entryShift = iBarShift(m_symbol, m_timeframe, entryTime, true);
+      if(entryShift < 0)
+         return 0;
+
+      return entryShift;
+   }
+
+   bool FindOurPosition(ulong &ticket, double &entryPrice,
+                        double &sl, double &tp, double &volume,
+                        long &positionId) const
+   {
+      ticket     = 0;
+      positionId = 0;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         const ulong posTicket = PositionGetTicket(i);
+         if(posTicket == 0)
+            continue;
+         if(PositionGetString(POSITION_SYMBOL) != m_symbol)
+            continue;
+         if((ulong)PositionGetInteger(POSITION_MAGIC) != m_magic)
+            continue;
+
+         ticket     = posTicket;
+         entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         sl         = PositionGetDouble(POSITION_SL);
+         tp         = PositionGetDouble(POSITION_TP);
+         volume     = PositionGetDouble(POSITION_VOLUME);
+         positionId = PositionGetInteger(POSITION_IDENTIFIER);
+         return true;
+      }
+      return false;
+   }
+
+public:
+   CStrategyAudit(void) :
+      m_enabled(false),
+      m_logger(NULL),
+      m_exits(NULL),
+      m_symbol(""),
+      m_timeframe(PERIOD_CURRENT),
+      m_magic(0),
+      m_tradeCount(0),
+      m_hasActive(false)
+   {}
+
+   void Init(CLogger *logger, const bool enabled, CExitManager *exits,
+             const string symbol, const ENUM_TIMEFRAMES timeframe,
+             const ulong magic)
+   {
+      m_logger    = logger;
+      m_enabled   = enabled;
+      m_exits     = exits;
+      m_symbol    = symbol;
+      m_timeframe = timeframe;
+      m_magic     = magic;
+      m_tradeCount = 0;
+      m_hasActive = false;
+   }
+
+   bool IsEnabled(void) const { return m_enabled; }
+
+   void RecordTradeEntry(const ENUM_SIGNAL signal,
+                         const SDirectionChecks &checks,
+                         const CIndicatorManager *indicators,
+                         const double lotSize,
+                         const datetime entryBarTime)
+   {
+      if(!m_enabled || m_logger == NULL || signal == SIGNAL_NONE || indicators == NULL)
+         return;
+
+      ulong ticket = 0;
+      double entryPrice = 0.0, sl = 0.0, tp = 0.0, volume = 0.0;
+      long positionId = 0;
+
+      if(!FindOurPosition(ticket, entryPrice, sl, tp, volume, positionId))
+         return;
+
+      double adx = 0.0, atr = 0.0, rsi = 0.0;
+      indicators.GetADX(adx, 1);
+      indicators.GetATR(atr, 1);
+      indicators.GetRSI(rsi, 1);
+
+      m_tradeCount++;
+      m_hasActive = true;
+
+      m_active.tradeNumber      = m_tradeCount;
+      m_active.direction        = signal;
+      m_active.entryTime        = TimeCurrent();
+      m_active.entryBarTime     = entryBarTime;
+      m_active.entryPrice       = entryPrice;
+      m_active.bosPass          = checks.bos;
+      m_active.htfPass          = checks.htf;
+      m_active.ltfPass          = checks.ltf;
+      m_active.adxValue         = adx;
+      m_active.atrValue         = atr;
+      m_active.emaSeparation    = ComputeEmaSeparation(indicators);
+      m_active.rsiValue         = rsi;
+      m_active.pullbackDistance = ComputePullbackDistance(signal, indicators);
+      m_active.candleConfirm    = checks.candle;
+      m_active.stopLoss         = sl;
+      m_active.takeProfit       = tp;
+      m_active.slDistance       = MathAbs(entryPrice - sl);
+      m_active.lotSize          = lotSize;
+      m_active.positionId       = (ulong)positionId;
+
+      m_logger.Audit("========== TRADE ENTRY ==========");
+      m_logger.Audit(StringFormat("Trade Number:        %d", m_active.tradeNumber));
+      m_logger.Audit(StringFormat("Direction:           %s",
+                                  (signal == SIGNAL_BUY ? "BUY" : "SELL")));
+      m_logger.Audit(StringFormat("Entry Time:          %s",
+                                  TimeToString(m_active.entryTime,
+                                               TIME_DATE | TIME_MINUTES | TIME_SECONDS)));
+      m_logger.Audit(StringFormat("Entry Price:         %.5f", m_active.entryPrice));
+      m_logger.Audit(StringFormat("BOS:                 %s", PassFailLabel(m_active.bosPass)));
+      m_logger.Audit(StringFormat("HTF Trend:           %s", PassFailLabel(m_active.htfPass)));
+      m_logger.Audit(StringFormat("LTF Trend:           %s", PassFailLabel(m_active.ltfPass)));
+      m_logger.Audit(StringFormat("ADX Value:           %.2f", m_active.adxValue));
+      m_logger.Audit(StringFormat("ATR Value:           %.5f", m_active.atrValue));
+      m_logger.Audit(StringFormat("EMA Separation:      %.3f (ATR units)", m_active.emaSeparation));
+      m_logger.Audit(StringFormat("RSI Value:           %.2f", m_active.rsiValue));
+      m_logger.Audit(StringFormat("Pullback Distance:   %.3f (ATR units)", m_active.pullbackDistance));
+      m_logger.Audit(StringFormat("Candle Confirmation: %s", PassFailLabel(m_active.candleConfirm)));
+      m_logger.Audit(StringFormat("Stop Loss:           %.5f", m_active.stopLoss));
+      m_logger.Audit(StringFormat("Take Profit:         %.5f", m_active.takeProfit));
+      m_logger.Audit("=================================");
+   }
+
+   void HandleDealAdd(const ulong dealTicket)
+   {
+      if(!m_enabled || !m_hasActive || m_logger == NULL)
+         return;
+
+      if(!HistoryDealSelect(dealTicket))
+         return;
+
+      if(HistoryDealGetString(DEAL_SYMBOL) != m_symbol)
+         return;
+      if((ulong)HistoryDealGetInteger(DEAL_MAGIC) != m_magic)
+         return;
+
+      const ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(DEAL_ENTRY);
+      if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY)
+         return;
+
+      const ulong dealPositionId = (ulong)HistoryDealGetInteger(DEAL_POSITION_ID);
+      if(m_active.positionId != 0 && dealPositionId != m_active.positionId)
+         return;
+
+      const double profit = HistoryDealGetDouble(DEAL_PROFIT) +
+                            HistoryDealGetDouble(DEAL_SWAP) +
+                            HistoryDealGetDouble(DEAL_COMMISSION);
+
+      const ENUM_DEAL_REASON reasonCode = (ENUM_DEAL_REASON)HistoryDealGetInteger(DEAL_REASON);
+      const string exitReason = DealReasonLabel(reasonCode);
+
+      const double tickValue = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
+      const double tickSize  = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+      double initialRisk = 0.0;
+      if(tickSize > 0.0 && m_active.slDistance > 0.0)
+         initialRisk = (m_active.slDistance / tickSize) * tickValue * m_active.lotSize;
+
+      const double rMultiple = (initialRisk > 0.0) ? profit / initialRisk : 0.0;
+      const int holdingBars = CountHoldingBars(m_active.entryTime);
+
+      m_logger.Audit("========== TRADE EXIT ==========");
+      m_logger.Audit(StringFormat("Trade Number:        %d", m_active.tradeNumber));
+      m_logger.Audit(StringFormat("Exit Reason:         %s", exitReason));
+      m_logger.Audit(StringFormat("Profit/Loss:         %.2f", profit));
+      m_logger.Audit(StringFormat("R-Multiple:          %.2fR", rMultiple));
+      m_logger.Audit(StringFormat("Holding Bars:        %d", holdingBars));
+      m_logger.Audit("=================================");
+
+      m_hasActive = false;
+   }
+};
+
+//+------------------------------------------------------------------+
 //| CPipelineStats - Backtest entry pipeline counters                  |
 //+------------------------------------------------------------------+
 class CPipelineStats
@@ -2670,6 +2974,7 @@ private:
    CTradeExecutor        m_executor;
 
    CPipelineStats        m_stats;
+   CStrategyAudit        m_audit;
 
    string             m_symbol;
    ENUM_TIMEFRAMES    m_timeframe;
@@ -2991,6 +3296,12 @@ public:
 
       m_logger.Info(StringFormat("EA ready | Symbol=%s Magic=%I64u",
                                  m_symbol, settings.magicNumber));
+
+      m_audit.Init(&m_logger, settings.enableStrategyAudit, &m_exits,
+                   m_symbol, m_timeframe, settings.magicNumber);
+      if(settings.enableStrategyAudit)
+         m_logger.Info("Strategy Audit Mode: ENABLED");
+
       return true;
    }
 
@@ -3170,11 +3481,23 @@ public:
             m_logger.Pipe(StringFormat("TRADE EXECUTED: %s | Lot=%.2f | Bar=%s",
                                        SignalLabel(signal), lotSize,
                                        TimeToString(barTime, TIME_DATE | TIME_MINUTES)));
+
+         if(g_settings.EnableStrategyAudit())
+         {
+            const SDirectionChecks auditChecks = CollectChecks(signal);
+            m_audit.RecordTradeEntry(signal, auditChecks, GetPointer(m_indicators),
+                                     lotSize, barTime);
+         }
       }
       else
       {
          RejectAndLog("Order send failed at broker", m_stats.rejectOrderSend);
       }
+   }
+
+   void HandleTradeTransaction(const ulong dealTicket)
+   {
+      m_audit.HandleDealAdd(dealTicket);
    }
 };
 
@@ -3218,5 +3541,16 @@ void OnDeinit(const int reason)
 void OnTick(void)
 {
    g_ea.OnTick();
+}
+
+//+------------------------------------------------------------------+
+//| Trade transaction handler (strategy audit exit logging)           |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+      g_ea.HandleTradeTransaction(trans.deal);
 }
 //+------------------------------------------------------------------+
