@@ -454,7 +454,7 @@ public:
       return true;
    }
 
-   const SSettings& Get(void) const { return m_settings; }
+   SSettings Get(void) const { return m_settings; }
 
    void PrintStartupConfig(CLogger *logger, const string symbol,
                            const ENUM_TIMEFRAMES timeframe) const
@@ -2912,7 +2912,7 @@ public:
 
    bool Init(void)
    {
-      const SSettings &settings = g_settings.Get();
+      SSettings settings = g_settings.Get();
 
       m_symbol          = _Symbol;
       m_timeframe       = PERIOD_CURRENT;
