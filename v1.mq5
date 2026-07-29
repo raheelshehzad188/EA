@@ -3,12 +3,19 @@
 //|                        Professional Trend-Following Expert Advisor|
 //+------------------------------------------------------------------+
 #property copyright "Professional EA"
-#property version   "2.07"
+#property version   "1.00"
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
 #include <Trade/PositionInfo.mqh>
 #include <Trade/AccountInfo.mqh>
+
+//+------------------------------------------------------------------+
+//| EA version and shared constants                                   |
+//+------------------------------------------------------------------+
+#define EA_PRODUCT_NAME           "ProEA"
+#define EA_VERSION_STRING         "1.0"
+#define EA_TRADE_DEVIATION_POINTS  20
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                      |
@@ -60,7 +67,7 @@ ENUM_ORDER_TYPE_FILLING GetFillingMode(const string symbol)
 //+------------------------------------------------------------------+
 input group "=== General ==="
 input ulong          InpMagicNumber        = 20260729;     // Magic number
-input string         InpTradeComment       = "ProEA_v1";   // Trade comment
+input string         InpTradeComment       = "ProEA_v1";   // Legacy label (trade tag uses EA version)
 
 input group "=== Trend Filter (EMA) ==="
 input int            InpFastEMA            = 50;           // Fast EMA period
@@ -88,16 +95,16 @@ input int            InpConfirmWindowBars  = 3;            // Confirm within N b
 
 input group "=== ATR Volatility Filter ==="
 input int            InpATRAvgPeriod       = 20;           // ATR average period
-input double         InpATRMinRatio        = 0.85;         // Min ATR vs average (avoid dead markets)
-input double         InpATRMaxRatio        = 2.50;         // Max ATR vs average (avoid news spikes)
+input double         InpATRMinRatio        = 0.70;         // Min ATR vs average (avoid dead markets)
+input double         InpATRMaxRatio        = 3.00;         // Max ATR vs average (avoid news spikes)
 
 input group "=== Dynamic ADX ==="
 input bool           InpUseDynamicADX      = true;         // Enable dynamic ADX threshold
 input int            InpADXAvgPeriod       = 14;           // ADX average period
 input bool           InpRequireADXRising   = true;         // Require ADX rising on closed bar
 
-input group "=== Range Avoidance ==="
-input double         InpMinEMASeparationATR = 0.35;        // Min |EMA50-EMA200| / ATR
+input group "=== Range Avoidance (Adaptive) ==="
+// EMA separation threshold scales with ADX: >35 → 0.20, >25 → 0.25, else → 0.30 ATR
 
 input group "=== Candle Confirmation ==="
 input bool           InpUseCandleConfirm   = true;         // Require candle confirmation
@@ -147,6 +154,67 @@ input bool           InpEnableDiagnostics  = true;         // Per-bar signal pip
 input bool           InpEnablePipelineLog    = true;         // [PASS/FAIL] entry pipeline instrumentation
 
 //+------------------------------------------------------------------+
+//| SSettings - Central configuration snapshot                        |
+//+------------------------------------------------------------------+
+struct SSettings
+{
+   ulong             magicNumber;
+   string            tradeComment;
+   int               fastEma;
+   int               slowEma;
+   int               rsiPeriod;
+   double            rsiBuyMin;
+   double            rsiSellMax;
+   double            rsiCrossLevel;
+   ENUM_TIMEFRAMES   htfTimeframe;
+   int               htfFastEma;
+   int               htfSlowEma;
+   int               swingLookback;
+   int               swingStrength;
+   int               pullbackMaxBars;
+   double            pullbackAtrZone;
+   int               confirmWindowBars;
+   int               atrAvgPeriod;
+   double            atrMinRatio;
+   double            atrMaxRatio;
+   bool              useDynamicAdx;
+   int               adxAvgPeriod;
+   bool              requireAdxRising;
+   bool              useCandleConfirm;
+   bool              useStructureExit;
+   bool              useRsiExit;
+   bool              useOppositeBosExit;
+   int               adxPeriod;
+   double            adxMinLevel;
+   int               atrPeriod;
+   double            slAtrMultiplier;
+   double            tpAtrMultiplier;
+   ENUM_LOT_MODE     lotMode;
+   double            fixedLot;
+   double            riskPercent;
+   int               maxSpreadPoints;
+   bool              useSessionFilter;
+   int               sessionStartHour;
+   int               sessionStartMinute;
+   int               sessionEndHour;
+   int               sessionEndMinute;
+   bool              useTrailingStop;
+   double            trailStartAtr;
+   double            trailStepAtr;
+   bool              useBreakEven;
+   double            breakEvenTriggerAtr;
+   int               breakEvenOffsetPoints;
+   ENUM_LOG_LEVEL    logLevel;
+   bool              enableDiagnostics;
+   bool              enablePipelineLog;
+   double            rangeAdxTier1;
+   double            rangeAdxTier2;
+   double            rangeEmaSepTier1;
+   double            rangeEmaSepTier2;
+   double            rangeEmaSepTier3;
+};
+
+//+------------------------------------------------------------------+
 //| CLogger - Centralized logging                                     |
 //+------------------------------------------------------------------+
 class CLogger
@@ -156,7 +224,7 @@ private:
    string         m_prefix;
 
 public:
-   CLogger(void) : m_level(LOG_LEVEL_INFO), m_prefix("ProEA") {}
+   CLogger(void) : m_level(LOG_LEVEL_INFO), m_prefix(EA_PRODUCT_NAME) {}
 
    void Init(const ENUM_LOG_LEVEL level, const string prefix)
    {
@@ -189,6 +257,229 @@ public:
    void Pipe(const string message) const
    {
       Print(m_prefix, " [PIPE]  ", message);
+   }
+};
+
+//+------------------------------------------------------------------+
+//| CSettingsManager - Load, validate, and expose configuration       |
+//+------------------------------------------------------------------+
+class CSettingsManager
+{
+private:
+   SSettings m_settings;
+
+   string TimeframeLabel(const ENUM_TIMEFRAMES timeframe) const
+   {
+      switch(timeframe)
+      {
+         case PERIOD_M1:   return "M1";
+         case PERIOD_M5:   return "M5";
+         case PERIOD_M15:  return "M15";
+         case PERIOD_M30:  return "M30";
+         case PERIOD_H1:   return "H1";
+         case PERIOD_H4:   return "H4";
+         case PERIOD_D1:   return "D1";
+         case PERIOD_W1:   return "W1";
+         case PERIOD_MN1:  return "MN1";
+         default:          return EnumToString(timeframe);
+      }
+   }
+
+   string LotModeLabel(const ENUM_LOT_MODE mode) const
+   {
+      return (mode == LOT_MODE_FIXED ? "Fixed" : "Risk Percent");
+   }
+
+   string SessionLabel(void) const
+   {
+      if(!m_settings.useSessionFilter)
+         return "Disabled";
+
+      return StringFormat("%02d:%02d - %02d:%02d",
+                          m_settings.sessionStartHour, m_settings.sessionStartMinute,
+                          m_settings.sessionEndHour, m_settings.sessionEndMinute);
+   }
+
+public:
+   CSettingsManager(void) {}
+
+   void LoadFromInputs(void)
+   {
+      m_settings.magicNumber            = InpMagicNumber;
+      m_settings.tradeComment           = StringFormat("%s v%s", EA_PRODUCT_NAME, EA_VERSION_STRING);
+      m_settings.fastEma                = InpFastEMA;
+      m_settings.slowEma                = InpSlowEMA;
+      m_settings.rsiPeriod              = InpRSIPeriod;
+      m_settings.rsiBuyMin              = InpRSIBuyMin;
+      m_settings.rsiSellMax             = InpRSISellMax;
+      m_settings.rsiCrossLevel          = InpRSICrossLevel;
+      m_settings.htfTimeframe           = InpHTFTimeframe;
+      m_settings.htfFastEma             = InpHTFFastEMA;
+      m_settings.htfSlowEma             = InpHTFSlowEMA;
+      m_settings.swingLookback          = InpSwingLookback;
+      m_settings.swingStrength          = InpSwingStrength;
+      m_settings.pullbackMaxBars        = InpPullbackMaxBars;
+      m_settings.pullbackAtrZone        = InpPullbackATRZone;
+      m_settings.confirmWindowBars      = InpConfirmWindowBars;
+      m_settings.atrAvgPeriod           = InpATRAvgPeriod;
+      m_settings.atrMinRatio            = InpATRMinRatio;
+      m_settings.atrMaxRatio            = InpATRMaxRatio;
+      m_settings.useDynamicAdx          = InpUseDynamicADX;
+      m_settings.adxAvgPeriod           = InpADXAvgPeriod;
+      m_settings.requireAdxRising       = InpRequireADXRising;
+      m_settings.useCandleConfirm       = InpUseCandleConfirm;
+      m_settings.useStructureExit       = InpUseStructureExit;
+      m_settings.useRsiExit             = InpUseRSIExit;
+      m_settings.useOppositeBosExit     = InpUseOppositeBOSExit;
+      m_settings.adxPeriod              = InpADXPeriod;
+      m_settings.adxMinLevel            = InpADXMinLevel;
+      m_settings.atrPeriod              = InpATRPeriod;
+      m_settings.slAtrMultiplier        = InpSL_ATR_Multiplier;
+      m_settings.tpAtrMultiplier        = InpTP_ATR_Multiplier;
+      m_settings.lotMode                = InpLotMode;
+      m_settings.fixedLot               = InpFixedLot;
+      m_settings.riskPercent            = InpRiskPercent;
+      m_settings.maxSpreadPoints        = InpMaxSpreadPoints;
+      m_settings.useSessionFilter       = InpUseSessionFilter;
+      m_settings.sessionStartHour       = InpSessionStartHour;
+      m_settings.sessionStartMinute     = InpSessionStartMinute;
+      m_settings.sessionEndHour         = InpSessionEndHour;
+      m_settings.sessionEndMinute       = InpSessionEndMinute;
+      m_settings.useTrailingStop        = InpUseTrailingStop;
+      m_settings.trailStartAtr          = InpTrailStartATR;
+      m_settings.trailStepAtr           = InpTrailStepATR;
+      m_settings.useBreakEven           = InpUseBreakEven;
+      m_settings.breakEvenTriggerAtr    = InpBreakEvenTriggerATR;
+      m_settings.breakEvenOffsetPoints  = InpBreakEvenOffsetPoints;
+      m_settings.logLevel               = InpLogLevel;
+      m_settings.enableDiagnostics      = InpEnableDiagnostics;
+      m_settings.enablePipelineLog      = InpEnablePipelineLog;
+      m_settings.rangeAdxTier1          = 35.0;
+      m_settings.rangeAdxTier2          = 25.0;
+      m_settings.rangeEmaSepTier1       = 0.20;
+      m_settings.rangeEmaSepTier2       = 0.25;
+      m_settings.rangeEmaSepTier3       = 0.30;
+   }
+
+   bool Validate(string &errorMessage) const
+   {
+      errorMessage = "";
+
+      if(m_settings.fastEma <= 0 || m_settings.slowEma <= 0 || m_settings.fastEma >= m_settings.slowEma)
+      {
+         errorMessage = "Invalid EMA periods: Fast EMA must be less than Slow EMA.";
+         return false;
+      }
+      if(m_settings.htfFastEma <= 0 || m_settings.htfSlowEma <= 0 ||
+         m_settings.htfFastEma >= m_settings.htfSlowEma)
+      {
+         errorMessage = "Invalid HTF EMA periods: Fast EMA must be less than Slow EMA.";
+         return false;
+      }
+      if(m_settings.adxPeriod <= 0 || m_settings.rsiPeriod <= 0 || m_settings.atrPeriod <= 0)
+      {
+         errorMessage = "Indicator periods must be greater than zero.";
+         return false;
+      }
+      if(m_settings.swingStrength <= 0 || m_settings.swingLookback <= m_settings.swingStrength * 2)
+      {
+         errorMessage = "Invalid swing parameters.";
+         return false;
+      }
+      if(m_settings.pullbackMaxBars <= 0)
+      {
+         errorMessage = "Pullback max bars must be greater than zero.";
+         return false;
+      }
+      if(m_settings.confirmWindowBars <= 0)
+      {
+         errorMessage = "Confirmation window bars must be greater than zero.";
+         return false;
+      }
+      if(m_settings.rsiBuyMin <= 0.0 || m_settings.rsiSellMax <= 0.0 ||
+         m_settings.rsiBuyMin <= m_settings.rsiSellMax)
+      {
+         errorMessage = "Invalid RSI momentum levels: BuyMin must be greater than SellMax.";
+         return false;
+      }
+      if(m_settings.atrAvgPeriod <= 0 || m_settings.adxAvgPeriod <= 0)
+      {
+         errorMessage = "Average periods must be greater than zero.";
+         return false;
+      }
+      if(m_settings.atrMinRatio <= 0.0 || m_settings.atrMaxRatio <= m_settings.atrMinRatio)
+      {
+         errorMessage = "Invalid ATR ratio parameters.";
+         return false;
+      }
+      if(m_settings.slAtrMultiplier <= 0.0 || m_settings.tpAtrMultiplier <= 0.0)
+      {
+         errorMessage = "ATR multipliers must be greater than zero.";
+         return false;
+      }
+      if(m_settings.fixedLot <= 0.0 && m_settings.lotMode == LOT_MODE_FIXED)
+      {
+         errorMessage = "Fixed lot must be greater than zero.";
+         return false;
+      }
+      if(m_settings.riskPercent <= 0.0 && m_settings.lotMode == LOT_MODE_RISK_PERCENT)
+      {
+         errorMessage = "Risk percent must be greater than zero.";
+         return false;
+      }
+      if(m_settings.maxSpreadPoints <= 0)
+      {
+         errorMessage = "Maximum spread must be greater than zero.";
+         return false;
+      }
+      if(m_settings.sessionStartHour < 0 || m_settings.sessionStartHour > 23 ||
+         m_settings.sessionEndHour < 0 || m_settings.sessionEndHour > 23 ||
+         m_settings.sessionStartMinute < 0 || m_settings.sessionStartMinute > 59 ||
+         m_settings.sessionEndMinute < 0 || m_settings.sessionEndMinute > 59)
+      {
+         errorMessage = "Session hours/minutes must be within valid clock ranges.";
+         return false;
+      }
+      if(m_settings.useTrailingStop &&
+         (m_settings.trailStartAtr <= 0.0 || m_settings.trailStepAtr <= 0.0))
+      {
+         errorMessage = "Trailing stop ATR multipliers must be greater than zero.";
+         return false;
+      }
+      if(m_settings.useBreakEven && m_settings.breakEvenTriggerAtr <= 0.0)
+      {
+         errorMessage = "Break-even trigger ATR must be greater than zero.";
+         return false;
+      }
+      return true;
+   }
+
+   const SSettings& Get(void) const { return m_settings; }
+
+   void PrintStartupConfig(CLogger *logger, const string symbol,
+                           const ENUM_TIMEFRAMES timeframe) const
+   {
+      if(logger == NULL)
+         return;
+
+      logger.Info("==========================");
+      logger.Info("EA STARTUP CONFIGURATION");
+      logger.Info("==========================");
+      logger.Info(StringFormat("EA Version:  %s v%s", EA_PRODUCT_NAME, EA_VERSION_STRING));
+      logger.Info(StringFormat("Symbol:      %s", symbol));
+      logger.Info(StringFormat("Timeframe:   %s", TimeframeLabel(timeframe)));
+      logger.Info(StringFormat("Risk:        %s (%.2f%% / %.2f lot)",
+                               LotModeLabel(m_settings.lotMode),
+                               m_settings.riskPercent,
+                               m_settings.fixedLot));
+      logger.Info(StringFormat("ATR Min:     %.2f", m_settings.atrMinRatio));
+      logger.Info(StringFormat("ATR Max:     %.2f", m_settings.atrMaxRatio));
+      logger.Info(StringFormat("ADX:         %.1f", m_settings.adxMinLevel));
+      logger.Info(StringFormat("EMA:         %d / %d", m_settings.fastEma, m_settings.slowEma));
+      logger.Info(StringFormat("Session:     %s", SessionLabel()));
+      logger.Info(StringFormat("Magic:       %I64u", m_settings.magicNumber));
+      logger.Info(StringFormat("Trade Tag:   %s", m_settings.tradeComment));
+      logger.Info("==========================");
    }
 };
 
@@ -259,6 +550,15 @@ public:
    {}
 
    void SetLogger(CLogger *logger) { m_logger = logger; }
+
+   bool Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
+             const SSettings &settings)
+   {
+      return Init(symbol, timeframe,
+                  settings.fastEma, settings.slowEma,
+                  settings.adxPeriod, settings.rsiPeriod, settings.atrPeriod,
+                  settings.htfTimeframe, settings.htfFastEma, settings.htfSlowEma);
+   }
 
    bool Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
              const int fastEma, const int slowEma,
@@ -492,6 +792,12 @@ public:
    {}
 
    void Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
+             CLogger *logger, const SSettings &settings)
+   {
+      Init(symbol, timeframe, settings.swingLookback, settings.swingStrength, logger);
+   }
+
+   void Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
              const int lookback, const int strength, CLogger *logger)
    {
       m_symbol    = symbol;
@@ -676,17 +982,15 @@ public:
       m_logger(NULL)
    {}
 
-   void Init(CLogger *logger, const int maxBars, const double pullbackAtrZone,
-             const double rsiBuyMin, const double rsiSellMax,
-             const int confirmWindowBars, const bool useCandleConfirm)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger            = logger;
-      m_maxBars           = maxBars;
-      m_pullbackAtrZone   = pullbackAtrZone;
-      m_rsiBuyMin         = rsiBuyMin;
-      m_rsiSellMax        = rsiSellMax;
-      m_confirmWindowBars = confirmWindowBars;
-      m_useCandleConfirm  = useCandleConfirm;
+      m_maxBars           = settings.pullbackMaxBars;
+      m_pullbackAtrZone   = settings.pullbackAtrZone;
+      m_rsiBuyMin         = settings.rsiBuyMin;
+      m_rsiSellMax        = settings.rsiSellMax;
+      m_confirmWindowBars = settings.confirmWindowBars;
+      m_useCandleConfirm  = settings.useCandleConfirm;
       Reset();
    }
 
@@ -944,7 +1248,20 @@ private:
    int                 m_atrAvgPeriod;
    double              m_atrMinRatio;
    double              m_atrMaxRatio;
-   double              m_minEmaSepAtr;
+   double              m_rangeAdxTier1;
+   double              m_rangeAdxTier2;
+   double              m_rangeEmaSepTier1;
+   double              m_rangeEmaSepTier2;
+   double              m_rangeEmaSepTier3;
+
+   double GetAdaptiveEmaSepThreshold(const double adx) const
+   {
+      if(adx > m_rangeAdxTier1)
+         return m_rangeEmaSepTier1;
+      if(adx > m_rangeAdxTier2)
+         return m_rangeEmaSepTier2;
+      return m_rangeEmaSepTier3;
+   }
 
    bool IsHTFBullish(void) const
    {
@@ -1041,10 +1358,12 @@ private:
          return true;
 
       const double emaSep = MathAbs(fastEma - slowEma) / atr;
-      if(emaSep < m_minEmaSepAtr)
+      const double minSep = GetAdaptiveEmaSepThreshold(adx1);
+      if(emaSep < minSep)
       {
          if(m_logger != NULL)
-            m_logger.Debug(StringFormat("Range filter | EMA sep/ATR=%.2f < %.2f", emaSep, m_minEmaSepAtr));
+            m_logger.Debug(StringFormat("Range filter | EMA sep/ATR=%.2f < %.2f (ADX=%.2f)",
+                                        emaSep, minSep, adx1));
          return true;
       }
 
@@ -1081,33 +1400,38 @@ public:
       m_indicators(NULL),
       m_structure(NULL),
       m_logger(NULL),
-      m_adxMin(22.0),
-      m_useDynamicAdx(true),
-      m_adxAvgPeriod(14),
-      m_requireAdxRising(true),
-      m_atrAvgPeriod(20),
-      m_atrMinRatio(0.85),
-      m_atrMaxRatio(2.50),
-      m_minEmaSepAtr(0.35)
+      m_adxMin(0.0),
+      m_useDynamicAdx(false),
+      m_adxAvgPeriod(0),
+      m_requireAdxRising(false),
+      m_atrAvgPeriod(0),
+      m_atrMinRatio(0.0),
+      m_atrMaxRatio(0.0),
+      m_rangeAdxTier1(0.0),
+      m_rangeAdxTier2(0.0),
+      m_rangeEmaSepTier1(0.0),
+      m_rangeEmaSepTier2(0.0),
+      m_rangeEmaSepTier3(0.0)
    {}
 
    void Init(const CIndicatorManager *indicators, CMarketStructure *structure, CLogger *logger,
-             const double adxMin, const bool useDynamicAdx, const int adxAvgPeriod,
-             const bool requireAdxRising, const int atrAvgPeriod,
-             const double atrMinRatio, const double atrMaxRatio,
-             const double minEmaSepAtr)
+             const SSettings &settings)
    {
-      m_indicators       = indicators;
-      m_structure        = structure;
-      m_logger           = logger;
-      m_adxMin           = adxMin;
-      m_useDynamicAdx    = useDynamicAdx;
-      m_adxAvgPeriod     = adxAvgPeriod;
-      m_requireAdxRising = requireAdxRising;
-      m_atrAvgPeriod     = atrAvgPeriod;
-      m_atrMinRatio      = atrMinRatio;
-      m_atrMaxRatio      = atrMaxRatio;
-      m_minEmaSepAtr     = minEmaSepAtr;
+      m_indicators         = indicators;
+      m_structure          = structure;
+      m_logger             = logger;
+      m_adxMin             = settings.adxMinLevel;
+      m_useDynamicAdx      = settings.useDynamicAdx;
+      m_adxAvgPeriod       = settings.adxAvgPeriod;
+      m_requireAdxRising   = settings.requireAdxRising;
+      m_atrAvgPeriod       = settings.atrAvgPeriod;
+      m_atrMinRatio        = settings.atrMinRatio;
+      m_atrMaxRatio        = settings.atrMaxRatio;
+      m_rangeAdxTier1      = settings.rangeAdxTier1;
+      m_rangeAdxTier2      = settings.rangeAdxTier2;
+      m_rangeEmaSepTier1   = settings.rangeEmaSepTier1;
+      m_rangeEmaSepTier2   = settings.rangeEmaSepTier2;
+      m_rangeEmaSepTier3   = settings.rangeEmaSepTier3;
    }
 
    bool PassesCoreFilters(void) const
@@ -1287,8 +1611,9 @@ public:
       }
 
       const double emaSep = (atr > 0.0 ? MathAbs(fastEma - slowEma) / atr : 0.0);
+      const double minSep = GetAdaptiveEmaSepThreshold(adx1);
       m_logger.Diag(StringFormat("Range detail | EMAsep/ATR=%.3f Min=%.3f ADX[1]=%.2f | trending=%s",
-                                 emaSep, m_minEmaSepAtr, adx1,
+                                 emaSep, minSep, adx1,
                                  (DiagRangeFilter() ? "TRUE" : "FALSE")));
    }
 
@@ -1406,22 +1731,21 @@ public:
       m_useOppositeBosExit(true)
    {}
 
-   void Init(CLogger *logger, const ulong magic, const CIndicatorManager *indicators,
-             CMarketStructure *structure, const double rsiCrossLevel,
-             const bool useStructureExit, const bool useRsiExit,
-             const bool useOppositeBosExit)
+   void Init(CLogger *logger, const SSettings &settings,
+             const CIndicatorManager *indicators,
+             CMarketStructure *structure)
    {
       m_logger             = logger;
-      m_magic              = magic;
+      m_magic              = settings.magicNumber;
       m_indicators         = indicators;
       m_structure          = structure;
-      m_rsiCrossLevel      = rsiCrossLevel;
-      m_useStructureExit   = useStructureExit;
-      m_useRsiExit         = useRsiExit;
-      m_useOppositeBosExit = useOppositeBosExit;
+      m_rsiCrossLevel      = settings.rsiCrossLevel;
+      m_useStructureExit   = settings.useStructureExit;
+      m_useRsiExit         = settings.useRsiExit;
+      m_useOppositeBosExit = settings.useOppositeBosExit;
 
       m_trade.SetExpertMagicNumber(m_magic);
-      m_trade.SetDeviationInPoints(20);
+      m_trade.SetDeviationInPoints(EA_TRADE_DEVIATION_POINTS);
    }
 
    bool RefreshSymbol(const string symbol)
@@ -1515,13 +1839,12 @@ public:
       m_riskPercent(1.0)
    {}
 
-   void Init(CLogger *logger, const ENUM_LOT_MODE lotMode,
-             const double fixedLot, const double riskPercent)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger      = logger;
-      m_lotMode     = lotMode;
-      m_fixedLot    = fixedLot;
-      m_riskPercent = riskPercent;
+      m_lotMode     = settings.lotMode;
+      m_fixedLot    = settings.fixedLot;
+      m_riskPercent = settings.riskPercent;
    }
 
    bool RefreshSymbol(const string symbol)
@@ -1611,17 +1934,15 @@ public:
       m_endMinute(0)
    {}
 
-   void Init(CLogger *logger, const int maxSpreadPoints,
-             const bool useSession, const int startHour, const int startMinute,
-             const int endHour, const int endMinute)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger           = logger;
-      m_maxSpreadPoints  = maxSpreadPoints;
-      m_useSession       = useSession;
-      m_startHour        = startHour;
-      m_startMinute      = startMinute;
-      m_endHour          = endHour;
-      m_endMinute        = endMinute;
+      m_maxSpreadPoints  = settings.maxSpreadPoints;
+      m_useSession       = settings.useSessionFilter;
+      m_startHour        = settings.sessionStartHour;
+      m_startMinute      = settings.sessionStartMinute;
+      m_endHour          = settings.sessionEndHour;
+      m_endMinute        = settings.sessionEndMinute;
    }
 
    bool RefreshSymbol(const string symbol)
@@ -1845,7 +2166,7 @@ public:
              CFilterManager *filters,
              const string symbol,
              const ENUM_TIMEFRAMES timeframe,
-             const bool enabled)
+             const SSettings &settings)
    {
       m_logger     = logger;
       m_indicators = indicators;
@@ -1855,7 +2176,7 @@ public:
       m_filters    = filters;
       m_symbol     = symbol;
       m_timeframe  = timeframe;
-      m_enabled    = enabled;
+      m_enabled    = settings.enableDiagnostics;
    }
 
    void PrintBarReport(const ENUM_SETUP_STATE setupState,
@@ -1955,21 +2276,19 @@ public:
       m_beOffsetPoints(5)
    {}
 
-   void Init(CLogger *logger, const ulong magic,
-             const bool useTrailing, const double trailStartAtr, const double trailStepAtr,
-             const bool useBreakEven, const double beTriggerAtr, const int beOffsetPoints)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger           = logger;
-      m_magic            = magic;
-      m_useTrailing      = useTrailing;
-      m_trailStartAtr    = trailStartAtr;
-      m_trailStepAtr     = trailStepAtr;
-      m_useBreakEven     = useBreakEven;
-      m_beTriggerAtr     = beTriggerAtr;
-      m_beOffsetPoints   = beOffsetPoints;
+      m_magic            = settings.magicNumber;
+      m_useTrailing      = settings.useTrailingStop;
+      m_trailStartAtr    = settings.trailStartAtr;
+      m_trailStepAtr     = settings.trailStepAtr;
+      m_useBreakEven     = settings.useBreakEven;
+      m_beTriggerAtr     = settings.breakEvenTriggerAtr;
+      m_beOffsetPoints   = settings.breakEvenOffsetPoints;
 
       m_trade.SetExpertMagicNumber(m_magic);
-      m_trade.SetDeviationInPoints(20);
+      m_trade.SetDeviationInPoints(EA_TRADE_DEVIATION_POINTS);
    }
 
    bool RefreshSymbol(const string symbol)
@@ -2116,17 +2435,16 @@ public:
       m_tpMultiplier(3.0)
    {}
 
-   void Init(CLogger *logger, const ulong magic, const string comment,
-             const double slMultiplier, const double tpMultiplier)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger       = logger;
-      m_magic        = magic;
-      m_comment      = comment;
-      m_slMultiplier = slMultiplier;
-      m_tpMultiplier = tpMultiplier;
+      m_magic        = settings.magicNumber;
+      m_comment      = settings.tradeComment;
+      m_slMultiplier = settings.slAtrMultiplier;
+      m_tpMultiplier = settings.tpAtrMultiplier;
 
       m_trade.SetExpertMagicNumber(m_magic);
-      m_trade.SetDeviationInPoints(20);
+      m_trade.SetDeviationInPoints(EA_TRADE_DEVIATION_POINTS);
    }
 
    bool RefreshSymbol(const string symbol)
@@ -2342,14 +2660,11 @@ private:
    CTradeExecutor        m_executor;
 
    CPipelineStats        m_stats;
-   bool                  m_pipelineLog;
 
    string             m_symbol;
    ENUM_TIMEFRAMES    m_timeframe;
    datetime           m_lastBarTime;
    datetime           m_lastExitBarTime;
-   double             m_slMultiplier;
-   double             m_tpMultiplier;
 
    bool IsNewBar(void)
    {
@@ -2363,71 +2678,6 @@ private:
          return true;
       }
       return false;
-   }
-
-   bool ValidateInputs(void) const
-   {
-      if(InpFastEMA <= 0 || InpSlowEMA <= 0 || InpFastEMA >= InpSlowEMA)
-      {
-         m_logger.Error("Invalid EMA periods: Fast EMA must be less than Slow EMA.");
-         return false;
-      }
-      if(InpHTFFastEMA <= 0 || InpHTFSlowEMA <= 0 || InpHTFFastEMA >= InpHTFSlowEMA)
-      {
-         m_logger.Error("Invalid HTF EMA periods: Fast EMA must be less than Slow EMA.");
-         return false;
-      }
-      if(InpADXPeriod <= 0 || InpRSIPeriod <= 0 || InpATRPeriod <= 0)
-      {
-         m_logger.Error("Indicator periods must be greater than zero.");
-         return false;
-      }
-      if(InpSwingStrength <= 0 || InpSwingLookback <= InpSwingStrength * 2)
-      {
-         m_logger.Error("Invalid swing parameters.");
-         return false;
-      }
-      if(InpPullbackMaxBars <= 0)
-      {
-         m_logger.Error("Pullback max bars must be greater than zero.");
-         return false;
-      }
-      if(InpConfirmWindowBars <= 0)
-      {
-         m_logger.Error("Confirmation window bars must be greater than zero.");
-         return false;
-      }
-      if(InpRSIBuyMin <= 0.0 || InpRSISellMax <= 0.0 || InpRSIBuyMin <= InpRSISellMax)
-      {
-         m_logger.Error("Invalid RSI momentum levels: BuyMin must be greater than SellMax.");
-         return false;
-      }
-      if(InpATRAvgPeriod <= 0 || InpADXAvgPeriod <= 0)
-      {
-         m_logger.Error("Average periods must be greater than zero.");
-         return false;
-      }
-      if(InpATRMinRatio <= 0.0 || InpATRMaxRatio <= InpATRMinRatio)
-      {
-         m_logger.Error("Invalid ATR ratio parameters.");
-         return false;
-      }
-      if(InpSL_ATR_Multiplier <= 0.0 || InpTP_ATR_Multiplier <= 0.0)
-      {
-         m_logger.Error("ATR multipliers must be greater than zero.");
-         return false;
-      }
-      if(InpFixedLot <= 0.0 && InpLotMode == LOT_MODE_FIXED)
-      {
-         m_logger.Error("Fixed lot must be greater than zero.");
-         return false;
-      }
-      if(InpRiskPercent <= 0.0 && InpLotMode == LOT_MODE_RISK_PERCENT)
-      {
-         m_logger.Error("Risk percent must be greater than zero.");
-         return false;
-      }
-      return true;
    }
 
    string SignalLabel(const ENUM_SIGNAL direction) const
@@ -2525,7 +2775,7 @@ private:
 
    void LogSetupRejection(const string sideLabel, const SDirectionChecks &checks)
    {
-      if(!m_pipelineLog)
+      if(!g_settings.Get().enablePipelineLog)
          return;
 
       if(!checks.bos)
@@ -2563,7 +2813,7 @@ private:
    void LogEntryRejection(const string sideLabel, const ENUM_SIGNAL direction,
                           const SDirectionChecks &checks)
    {
-      if(!m_pipelineLog)
+      if(!g_settings.Get().enablePipelineLog)
          return;
 
       if(!checks.pullback)
@@ -2587,7 +2837,7 @@ private:
    void PrintDirectionBlock(const string sideLabel, const ENUM_SIGNAL direction,
                             const bool logRejections, const bool entryPhase)
    {
-      if(!m_pipelineLog)
+      if(!g_settings.Get().enablePipelineLog)
          return;
 
       const SDirectionChecks checks = CollectChecks(direction);
@@ -2617,7 +2867,7 @@ private:
    void PrintBarDebugReport(const datetime barTime, const bool entryPhase,
                             const ENUM_SIGNAL armedDir)
    {
-      if(!m_pipelineLog)
+      if(!g_settings.Get().enablePipelineLog)
          return;
 
       m_stats.barsChecked++;
@@ -2639,7 +2889,7 @@ private:
    void RejectAndLog(const string reason, int &counter)
    {
       counter++;
-      if(m_pipelineLog)
+      if(g_settings.Get().enablePipelineLog)
          m_logger.Pipe("REJECTED: " + reason);
    }
 
@@ -2648,10 +2898,7 @@ public:
       m_symbol(_Symbol),
       m_timeframe(PERIOD_CURRENT),
       m_lastBarTime(0),
-      m_lastExitBarTime(0),
-      m_slMultiplier(2.0),
-      m_tpMultiplier(3.0),
-      m_pipelineLog(true)
+      m_lastExitBarTime(0)
    {}
 
    ENUM_SIGNAL GetArmedDirection(void) const
@@ -2665,62 +2912,43 @@ public:
 
    bool Init(void)
    {
-      m_symbol    = _Symbol;
-      m_timeframe = PERIOD_CURRENT;
-      m_lastBarTime = iTime(m_symbol, m_timeframe, 0);
+      const SSettings &settings = g_settings.Get();
+
+      m_symbol          = _Symbol;
+      m_timeframe       = PERIOD_CURRENT;
+      m_lastBarTime     = iTime(m_symbol, m_timeframe, 0);
       m_lastExitBarTime = 0;
-      m_slMultiplier = InpSL_ATR_Multiplier;
-      m_tpMultiplier = InpTP_ATR_Multiplier;
-      m_pipelineLog  = InpEnablePipelineLog;
       m_stats.Reset();
 
-      m_logger.Init(InpLogLevel, "ProEA");
-      m_logger.Info("Initializing Expert Advisor v2.07...");
+      m_logger.Init(settings.logLevel, EA_PRODUCT_NAME);
+      m_logger.Info(StringFormat("Initializing %s v%s...", EA_PRODUCT_NAME, EA_VERSION_STRING));
 
-      if(!ValidateInputs())
-         return false;
+      g_settings.PrintStartupConfig(GetPointer(m_logger), m_symbol, m_timeframe);
 
       m_indicators.SetLogger(GetPointer(m_logger));
-      if(!m_indicators.Init(m_symbol, m_timeframe,
-                            InpFastEMA, InpSlowEMA,
-                            InpADXPeriod, InpRSIPeriod, InpATRPeriod,
-                            InpHTFTimeframe, InpHTFFastEMA, InpHTFSlowEMA))
+      if(!m_indicators.Init(m_symbol, m_timeframe, settings))
          return false;
 
-      m_structure.Init(m_symbol, m_timeframe,
-                       InpSwingLookback, InpSwingStrength,
-                       GetPointer(m_logger));
+      m_structure.Init(m_symbol, m_timeframe, GetPointer(m_logger), settings);
 
-      m_signals.Init(GetPointer(m_indicators), GetPointer(m_structure), GetPointer(m_logger),
-                     InpADXMinLevel, InpUseDynamicADX, InpADXAvgPeriod,
-                     InpRequireADXRising, InpATRAvgPeriod,
-                     InpATRMinRatio, InpATRMaxRatio, InpMinEMASeparationATR);
-
-      m_pullback.Init(GetPointer(m_logger), InpPullbackMaxBars, InpPullbackATRZone,
-                      InpRSIBuyMin, InpRSISellMax, InpConfirmWindowBars,
-                      InpUseCandleConfirm);
-
-      m_exits.Init(GetPointer(m_logger), InpMagicNumber,
-                   GetPointer(m_indicators), GetPointer(m_structure),
-                   InpRSICrossLevel, InpUseStructureExit,
-                   InpUseRSIExit, InpUseOppositeBOSExit);
+      m_signals.Init(GetPointer(m_indicators), GetPointer(m_structure), GetPointer(m_logger), settings);
+      m_pullback.Init(GetPointer(m_logger), settings);
+      m_exits.Init(GetPointer(m_logger), settings,
+                   GetPointer(m_indicators), GetPointer(m_structure));
       if(!m_exits.RefreshSymbol(m_symbol))
       {
          m_logger.Error("Failed to bind exit manager to symbol.");
          return false;
       }
 
-      m_risk.Init(GetPointer(m_logger), InpLotMode, InpFixedLot, InpRiskPercent);
+      m_risk.Init(GetPointer(m_logger), settings);
       if(!m_risk.RefreshSymbol(m_symbol))
       {
          m_logger.Error("Failed to bind risk manager to symbol.");
          return false;
       }
 
-      m_filters.Init(GetPointer(m_logger), InpMaxSpreadPoints,
-                     InpUseSessionFilter,
-                     InpSessionStartHour, InpSessionStartMinute,
-                     InpSessionEndHour, InpSessionEndMinute);
+      m_filters.Init(GetPointer(m_logger), settings);
       if(!m_filters.RefreshSymbol(m_symbol))
       {
          m_logger.Error("Failed to bind filter manager to symbol.");
@@ -2735,27 +2963,24 @@ public:
                          GetPointer(m_filters),
                          m_symbol,
                          m_timeframe,
-                         InpEnableDiagnostics);
+                         settings);
 
-      m_positions.Init(GetPointer(m_logger), InpMagicNumber,
-                       InpUseTrailingStop, InpTrailStartATR, InpTrailStepATR,
-                       InpUseBreakEven, InpBreakEvenTriggerATR, InpBreakEvenOffsetPoints);
+      m_positions.Init(GetPointer(m_logger), settings);
       if(!m_positions.RefreshSymbol(m_symbol))
       {
          m_logger.Error("Failed to bind position manager to symbol.");
          return false;
       }
 
-      m_executor.Init(GetPointer(m_logger), InpMagicNumber, InpTradeComment,
-                      InpSL_ATR_Multiplier, InpTP_ATR_Multiplier);
+      m_executor.Init(GetPointer(m_logger), settings);
       if(!m_executor.RefreshSymbol(m_symbol))
       {
          m_logger.Error("Failed to bind trade executor to symbol.");
          return false;
       }
 
-      m_logger.Info(StringFormat("EA ready | Symbol=%s Magic=%I64u | Modules: SignalEngine, Structure, Pullback, Exit",
-                                 m_symbol, InpMagicNumber));
+      m_logger.Info(StringFormat("EA ready | Symbol=%s Magic=%I64u",
+                                 m_symbol, settings.magicNumber));
       return true;
    }
 
@@ -2791,7 +3016,7 @@ public:
       const datetime barTime            = iTime(m_symbol, m_timeframe, 1);
       const bool entryPhase             = (setupState != SETUP_NONE && armedDir != SIGNAL_NONE);
 
-      if(InpEnableDiagnostics)
+      if(g_settings.Get().enableDiagnostics)
          m_diagnostics.PrintBarReport(setupState, armedDir);
 
       PrintBarDebugReport(barTime, entryPhase, armedDir);
@@ -2820,7 +3045,7 @@ public:
                const SDirectionChecks entryChecks = CollectChecks(confirmDir);
                RecordEntryAttemptStats(confirmDir, entryChecks);
 
-               if(m_pipelineLog)
+               if(g_settings.Get().enablePipelineLog)
                {
                   PrintDirectionBlock(SignalLabel(confirmDir), confirmDir, true, true);
                   if(signal == SIGNAL_NONE)
@@ -2896,12 +3121,12 @@ public:
             m_pullback.ArmSetup(setup);
             m_stats.setupsArmed++;
 
-            if(m_pipelineLog)
+            if(g_settings.Get().enablePipelineLog)
                m_logger.Pipe(StringFormat("SETUP ARMED: %s on bar %s",
                                           SignalLabel(setup),
                                           TimeToString(barTime, TIME_DATE | TIME_MINUTES)));
          }
-         else if(m_pipelineLog)
+         else if(g_settings.Get().enablePipelineLog)
          {
             if(buyChecks.bos)
                LogSetupRejection("BUY", buyChecks);
@@ -2919,7 +3144,7 @@ public:
          return;
       }
 
-      const double slDistance = m_slMultiplier * atrValue;
+      const double slDistance = g_settings.Get().slAtrMultiplier * atrValue;
       const double lotSize    = m_risk.CalculateLotSize(slDistance);
 
       if(lotSize <= 0.0)
@@ -2931,7 +3156,7 @@ public:
       if(m_executor.OpenTrade(signal, lotSize, atrValue))
       {
          m_stats.tradesExecuted++;
-         if(m_pipelineLog)
+         if(g_settings.Get().enablePipelineLog)
             m_logger.Pipe(StringFormat("TRADE EXECUTED: %s | Lot=%.2f | Bar=%s",
                                        SignalLabel(signal), lotSize,
                                        TimeToString(barTime, TIME_DATE | TIME_MINUTES)));
@@ -2944,17 +3169,28 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| Global EA instance                                                |
+//| Global instances                                                  |
 //+------------------------------------------------------------------+
-CExpertAdvisor g_ea;
+CSettingsManager g_settings;
+CExpertAdvisor   g_ea;
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
 //+------------------------------------------------------------------+
 int OnInit(void)
 {
+   g_settings.LoadFromInputs();
+
+   string configError = "";
+   if(!g_settings.Validate(configError))
+   {
+      Print(EA_PRODUCT_NAME, " [ERROR] Configuration validation failed: ", configError);
+      return INIT_FAILED;
+   }
+
    if(!g_ea.Init())
       return INIT_FAILED;
+
    return INIT_SUCCEEDED;
 }
 
