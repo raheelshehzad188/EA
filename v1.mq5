@@ -561,7 +561,7 @@ public:
    void SetLogger(CLogger *logger) { m_logger = logger; }
 
    bool Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
-             const SSettings settings)
+             const SSettings &settings)
    {
       return Init(symbol, timeframe,
                   settings.fastEma, settings.slowEma,
@@ -801,7 +801,7 @@ public:
    {}
 
    void Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
-             CLogger *logger, const SSettings settings)
+             CLogger *logger, const SSettings &settings)
    {
       Init(symbol, timeframe, settings.swingLookback, settings.swingStrength, logger);
    }
@@ -991,7 +991,7 @@ public:
       m_logger(NULL)
    {}
 
-   void Init(CLogger *logger, const SSettings settings)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger            = logger;
       m_maxBars           = settings.pullbackMaxBars;
@@ -1424,7 +1424,7 @@ public:
    {}
 
    void Init(const CIndicatorManager *indicators, CMarketStructure *structure, CLogger *logger,
-             const SSettings settings)
+             const SSettings &settings)
    {
       m_indicators         = indicators;
       m_structure          = structure;
@@ -1740,7 +1740,7 @@ public:
       m_useOppositeBosExit(true)
    {}
 
-   void Init(CLogger *logger, const SSettings settings,
+   void Init(CLogger *logger, const SSettings &settings,
              const CIndicatorManager *indicators,
              CMarketStructure *structure)
    {
@@ -1848,7 +1848,7 @@ public:
       m_riskPercent(1.0)
    {}
 
-   void Init(CLogger *logger, const SSettings settings)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger      = logger;
       m_lotMode     = settings.lotMode;
@@ -1943,7 +1943,7 @@ public:
       m_endMinute(0)
    {}
 
-   void Init(CLogger *logger, const SSettings settings)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger           = logger;
       m_maxSpreadPoints  = settings.maxSpreadPoints;
@@ -2175,7 +2175,7 @@ public:
              CFilterManager *filters,
              const string symbol,
              const ENUM_TIMEFRAMES timeframe,
-             const SSettings settings)
+             const SSettings &settings)
    {
       m_logger     = logger;
       m_indicators = indicators;
@@ -2285,7 +2285,7 @@ public:
       m_beOffsetPoints(5)
    {}
 
-   void Init(CLogger *logger, const SSettings settings)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger           = logger;
       m_magic            = settings.magicNumber;
@@ -2444,7 +2444,7 @@ public:
       m_tpMultiplier(3.0)
    {}
 
-   void Init(CLogger *logger, const SSettings settings)
+   void Init(CLogger *logger, const SSettings &settings)
    {
       m_logger       = logger;
       m_magic        = settings.magicNumber;
