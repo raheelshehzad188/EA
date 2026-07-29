@@ -3,7 +3,7 @@
 //|                        Professional Trend-Following Expert Advisor|
 //+------------------------------------------------------------------+
 #property copyright "Professional EA"
-#property version   "2.03"
+#property version   "2.05"
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
@@ -66,9 +66,11 @@ input group "=== Trend Filter (EMA) ==="
 input int            InpFastEMA            = 50;           // Fast EMA period
 input int            InpSlowEMA            = 200;          // Slow EMA period
 
-input group "=== RSI Momentum Cross ==="
+input group "=== RSI Momentum ==="
 input int            InpRSIPeriod          = 14;           // RSI period
-input double         InpRSICrossLevel      = 50.0;         // RSI cross trigger level
+input double         InpRSIBuyMin          = 55.0;         // BUY: RSI minimum (rising)
+input double         InpRSISellMax         = 45.0;         // SELL: RSI maximum (falling)
+input double         InpRSICrossLevel      = 50.0;         // Exit: RSI reversal level
 
 input group "=== Higher Timeframe Trend (H4) ==="
 input ENUM_TIMEFRAMES InpHTFTimeframe      = PERIOD_H4;    // HTF for trend confirmation
@@ -82,6 +84,7 @@ input int            InpSwingStrength      = 2;            // Swing pivot streng
 input group "=== Pullback Entry ==="
 input int            InpPullbackMaxBars    = 8;            // Max bars to wait for pullback
 input double         InpPullbackATRZone    = 0.5;          // Pullback zone (ATR from EMA)
+input int            InpConfirmWindowBars  = 3;            // Confirm within N bars after EMA touch
 
 input group "=== ATR Volatility Filter ==="
 input int            InpATRAvgPeriod       = 20;           // ATR average period
@@ -561,9 +564,100 @@ private:
    int              m_barsRemaining;
    int              m_maxBars;
    double           m_pullbackAtrZone;
-   double           m_rsiCrossLevel;
+   double           m_rsiBuyMin;
+   double           m_rsiSellMax;
+   int              m_confirmWindowBars;
    bool             m_useCandleConfirm;
+   bool             m_zoneTouched;
+   int              m_confirmBarsRemaining;
+   bool             m_rsiConfirmed;
+   bool             m_candleConfirmed;
    CLogger         *m_logger;
+
+   void ResetConfirmState(void)
+   {
+      m_zoneTouched           = false;
+      m_confirmBarsRemaining  = 0;
+      m_rsiConfirmed          = false;
+      m_candleConfirmed       = false;
+   }
+
+   bool IsZoneTouched(const ENUM_SIGNAL direction,
+                      CIndicatorManager *indicators) const
+   {
+      double fastEma = 0.0;
+      double atr     = 0.0;
+      double low1 = 0.0, high1 = 0.0, open1 = 0.0, close1 = 0.0;
+
+      if(!indicators.GetFastEMA(fastEma, 1) ||
+         !indicators.GetATR(atr, 1) ||
+         !indicators.GetBarOHLC(1, open1, high1, low1, close1))
+         return false;
+
+      const double zone = m_pullbackAtrZone * atr;
+
+      if(direction == SIGNAL_BUY)
+         return (low1 <= fastEma + zone);
+
+      if(direction == SIGNAL_SELL)
+         return (high1 >= fastEma - zone);
+
+      return false;
+   }
+
+   bool IsRSIMomentum(const ENUM_SIGNAL direction,
+                      CIndicatorManager *indicators) const
+   {
+      double rsi1 = 0.0;
+      double rsi2 = 0.0;
+
+      if(!indicators.GetRSI(rsi1, 1) || !indicators.GetRSI(rsi2, 2))
+         return false;
+
+      if(direction == SIGNAL_BUY)
+         return (rsi1 > m_rsiBuyMin && rsi1 > rsi2);
+
+      if(direction == SIGNAL_SELL)
+         return (rsi1 < m_rsiSellMax && rsi1 < rsi2);
+
+      return false;
+   }
+
+   bool IsCandleConfirmed(const ENUM_SIGNAL direction,
+                          CIndicatorManager *indicators) const
+   {
+      if(!m_useCandleConfirm)
+         return true;
+
+      double open1 = 0.0, high1 = 0.0, low1 = 0.0, close1 = 0.0;
+      double fastEma = 0.0;
+
+      if(!indicators.GetBarOHLC(1, open1, high1, low1, close1) ||
+         !indicators.GetFastEMA(fastEma, 1))
+         return false;
+
+      if(direction == SIGNAL_BUY)
+         return (close1 > open1 && close1 > fastEma);
+
+      if(direction == SIGNAL_SELL)
+         return (close1 < open1 && close1 < fastEma);
+
+      return false;
+   }
+
+   void UpdateConfirmFlags(const ENUM_SIGNAL direction,
+                           CIndicatorManager *indicators)
+   {
+      if(IsRSIMomentum(direction, indicators))
+         m_rsiConfirmed = true;
+      if(IsCandleConfirmed(direction, indicators))
+         m_candleConfirmed = true;
+   }
+
+   bool IsFullyConfirmed(void) const
+   {
+      return (m_zoneTouched && m_rsiConfirmed && m_candleConfirmed);
+   }
 
 public:
    CPullbackEntryManager(void) :
@@ -571,19 +665,28 @@ public:
       m_barsRemaining(0),
       m_maxBars(8),
       m_pullbackAtrZone(0.5),
-      m_rsiCrossLevel(50.0),
+      m_rsiBuyMin(55.0),
+      m_rsiSellMax(45.0),
+      m_confirmWindowBars(3),
       m_useCandleConfirm(true),
+      m_zoneTouched(false),
+      m_confirmBarsRemaining(0),
+      m_rsiConfirmed(false),
+      m_candleConfirmed(false),
       m_logger(NULL)
    {}
 
    void Init(CLogger *logger, const int maxBars, const double pullbackAtrZone,
-             const double rsiCrossLevel, const bool useCandleConfirm)
+             const double rsiBuyMin, const double rsiSellMax,
+             const int confirmWindowBars, const bool useCandleConfirm)
    {
-      m_logger           = logger;
-      m_maxBars          = maxBars;
-      m_pullbackAtrZone  = pullbackAtrZone;
-      m_rsiCrossLevel    = rsiCrossLevel;
-      m_useCandleConfirm = useCandleConfirm;
+      m_logger            = logger;
+      m_maxBars           = maxBars;
+      m_pullbackAtrZone   = pullbackAtrZone;
+      m_rsiBuyMin         = rsiBuyMin;
+      m_rsiSellMax        = rsiSellMax;
+      m_confirmWindowBars = confirmWindowBars;
+      m_useCandleConfirm  = useCandleConfirm;
       Reset();
    }
 
@@ -591,6 +694,7 @@ public:
    {
       m_state         = SETUP_NONE;
       m_barsRemaining = 0;
+      ResetConfirmState();
    }
 
    ENUM_SETUP_STATE GetState(void) const { return m_state; }
@@ -599,19 +703,19 @@ public:
    bool CheckPullback(const ENUM_SIGNAL direction,
                       CIndicatorManager *indicators) const
    {
-      return IsPullbackToEMA(direction, indicators);
+      return (m_zoneTouched || IsZoneTouched(direction, indicators));
    }
 
-   bool CheckRSICross(const ENUM_SIGNAL direction,
-                      CIndicatorManager *indicators) const
+   bool CheckRSIMomentum(const ENUM_SIGNAL direction,
+                         CIndicatorManager *indicators) const
    {
-      return IsRSIMomentumCross(direction, indicators);
+      return (m_rsiConfirmed || IsRSIMomentum(direction, indicators));
    }
 
    bool CheckCandleConfirm(const ENUM_SIGNAL direction,
                            CIndicatorManager *indicators) const
    {
-      return IsCandleConfirmed(direction, indicators);
+      return (m_candleConfirmed || IsCandleConfirmed(direction, indicators));
    }
 
    void LogPullbackDetail(const ENUM_SIGNAL direction,
@@ -637,20 +741,16 @@ public:
       if(direction == SIGNAL_BUY)
       {
          const bool touchedZone = (low1 <= fastEma + zone);
-         const bool closedAbove = (close1 > fastEma);
-         m_logger.Diag(StringFormat("Pullback BUY detail | Low=%.5f EMA=%.5f ZoneTop=%.5f Close=%.5f | touched=%s closedAbove=%s",
-                                    low1, fastEma, fastEma + zone, close1,
-                                    (touchedZone ? "TRUE" : "FALSE"),
-                                    (closedAbove ? "TRUE" : "FALSE")));
+         m_logger.Diag(StringFormat("Pullback BUY detail | Low=%.5f EMA=%.5f ZoneTop=%.5f | touched=%s window=%d",
+                                    low1, fastEma, fastEma + zone,
+                                    (touchedZone ? "TRUE" : "FALSE"), m_confirmBarsRemaining));
       }
       else if(direction == SIGNAL_SELL)
       {
          const bool touchedZone = (high1 >= fastEma - zone);
-         const bool closedBelow = (close1 < fastEma);
-         m_logger.Diag(StringFormat("Pullback SELL detail | High=%.5f EMA=%.5f ZoneBot=%.5f Close=%.5f | touched=%s closedBelow=%s",
-                                    high1, fastEma, fastEma - zone, close1,
-                                    (touchedZone ? "TRUE" : "FALSE"),
-                                    (closedBelow ? "TRUE" : "FALSE")));
+         m_logger.Diag(StringFormat("Pullback SELL detail | High=%.5f EMA=%.5f ZoneBot=%.5f | touched=%s window=%d",
+                                    high1, fastEma, fastEma - zone,
+                                    (touchedZone ? "TRUE" : "FALSE"), m_confirmBarsRemaining));
       }
    }
 
@@ -670,18 +770,18 @@ public:
 
       if(direction == SIGNAL_BUY)
       {
-         const bool crossUp = (rsi2 <= m_rsiCrossLevel && rsi1 > m_rsiCrossLevel && rsi1 > rsi2);
-         m_logger.Diag(StringFormat("RSI BUY detail | RSI[1]=%.2f RSI[2]=%.2f Level=%.2f | crossUp=%s rising=%s",
-                                    rsi1, rsi2, m_rsiCrossLevel,
-                                    (crossUp ? "TRUE" : "FALSE"),
+         const bool momentum = (rsi1 > m_rsiBuyMin && rsi1 > rsi2);
+         m_logger.Diag(StringFormat("RSI BUY detail | RSI[1]=%.2f RSI[2]=%.2f Min=%.2f | momentum=%s rising=%s",
+                                    rsi1, rsi2, m_rsiBuyMin,
+                                    (momentum ? "TRUE" : "FALSE"),
                                     (rsi1 > rsi2 ? "TRUE" : "FALSE")));
       }
       else if(direction == SIGNAL_SELL)
       {
-         const bool crossDn = (rsi2 >= m_rsiCrossLevel && rsi1 < m_rsiCrossLevel && rsi1 < rsi2);
-         m_logger.Diag(StringFormat("RSI SELL detail | RSI[1]=%.2f RSI[2]=%.2f Level=%.2f | crossDn=%s falling=%s",
-                                    rsi1, rsi2, m_rsiCrossLevel,
-                                    (crossDn ? "TRUE" : "FALSE"),
+         const bool momentum = (rsi1 < m_rsiSellMax && rsi1 < rsi2);
+         m_logger.Diag(StringFormat("RSI SELL detail | RSI[1]=%.2f RSI[2]=%.2f Max=%.2f | momentum=%s falling=%s",
+                                    rsi1, rsi2, m_rsiSellMax,
+                                    (momentum ? "TRUE" : "FALSE"),
                                     (rsi1 < rsi2 ? "TRUE" : "FALSE")));
       }
    }
@@ -699,10 +799,10 @@ public:
       }
 
       double open1 = 0.0, high1 = 0.0, low1 = 0.0, close1 = 0.0;
-      double open2 = 0.0, high2 = 0.0, low2 = 0.0, close2 = 0.0;
+      double fastEma = 0.0;
 
       if(!indicators.GetBarOHLC(1, open1, high1, low1, close1) ||
-         !indicators.GetBarOHLC(2, open2, high2, low2, close2))
+         !indicators.GetFastEMA(fastEma, 1))
       {
          m_logger.Diag("Candle detail: OHLC data unavailable.");
          return;
@@ -711,20 +811,20 @@ public:
       if(direction == SIGNAL_BUY)
       {
          const bool bullishBody = (close1 > open1);
-         const bool breaksPrior = (close1 > high2);
-         m_logger.Diag(StringFormat("Candle BUY detail | O=%.5f H=%.5f L=%.5f C=%.5f PriorHigh=%.5f | bullish=%s breakPrior=%s",
-                                    open1, high1, low1, close1, high2,
+         const bool aboveEma    = (close1 > fastEma);
+         m_logger.Diag(StringFormat("Candle BUY detail | O=%.5f C=%.5f EMA50=%.5f | bullish=%s aboveEMA=%s",
+                                    open1, close1, fastEma,
                                     (bullishBody ? "TRUE" : "FALSE"),
-                                    (breaksPrior ? "TRUE" : "FALSE")));
+                                    (aboveEma ? "TRUE" : "FALSE")));
       }
       else if(direction == SIGNAL_SELL)
       {
          const bool bearishBody = (close1 < open1);
-         const bool breaksPrior = (close1 < low2);
-         m_logger.Diag(StringFormat("Candle SELL detail | O=%.5f H=%.5f L=%.5f C=%.5f PriorLow=%.5f | bearish=%s breakPrior=%s",
-                                    open1, high1, low1, close1, low2,
+         const bool belowEma    = (close1 < fastEma);
+         m_logger.Diag(StringFormat("Candle SELL detail | O=%.5f C=%.5f EMA50=%.5f | bearish=%s belowEMA=%s",
+                                    open1, close1, fastEma,
                                     (bearishBody ? "TRUE" : "FALSE"),
-                                    (breaksPrior ? "TRUE" : "FALSE")));
+                                    (belowEma ? "TRUE" : "FALSE")));
       }
    }
 
@@ -741,10 +841,12 @@ public:
       }
 
       m_barsRemaining = m_maxBars;
+      ResetConfirmState();
 
       if(m_logger != NULL)
-         m_logger.Info(StringFormat("Pullback armed | Direction=%s | MaxBars=%d",
-                                    (direction == SIGNAL_BUY ? "BUY" : "SELL"), m_maxBars));
+         m_logger.Info(StringFormat("Pullback armed | Direction=%s | MaxBars=%d | ConfirmWindow=%d",
+                                    (direction == SIGNAL_BUY ? "BUY" : "SELL"),
+                                    m_maxBars, m_confirmWindowBars));
    }
 
    void DecrementBar(void)
@@ -759,77 +861,6 @@ public:
             m_logger.Debug("Pullback setup expired.");
          Reset();
       }
-   }
-
-   bool IsPullbackToEMA(const ENUM_SIGNAL direction,
-                        CIndicatorManager *indicators) const
-   {
-      double fastEma = 0.0;
-      double atr     = 0.0;
-      double low1 = 0.0, high1 = 0.0, open1 = 0.0, close1 = 0.0;
-
-      if(!indicators.GetFastEMA(fastEma, 1) ||
-         !indicators.GetATR(atr, 1) ||
-         !indicators.GetBarOHLC(1, open1, high1, low1, close1))
-         return false;
-
-      const double zone = m_pullbackAtrZone * atr;
-
-      if(direction == SIGNAL_BUY)
-      {
-         const bool touchedZone = (low1 <= fastEma + zone);
-         const bool closedAbove = (close1 > fastEma);
-         return touchedZone && closedAbove;
-      }
-
-      if(direction == SIGNAL_SELL)
-      {
-         const bool touchedZone = (high1 >= fastEma - zone);
-         const bool closedBelow = (close1 < fastEma);
-         return touchedZone && closedBelow;
-      }
-
-      return false;
-   }
-
-   bool IsRSIMomentumCross(const ENUM_SIGNAL direction,
-                           CIndicatorManager *indicators) const
-   {
-      double rsi1 = 0.0;
-      double rsi2 = 0.0;
-
-      if(!indicators.GetRSI(rsi1, 1) || !indicators.GetRSI(rsi2, 2))
-         return false;
-
-      if(direction == SIGNAL_BUY)
-         return (rsi2 <= m_rsiCrossLevel && rsi1 > m_rsiCrossLevel && rsi1 > rsi2);
-
-      if(direction == SIGNAL_SELL)
-         return (rsi2 >= m_rsiCrossLevel && rsi1 < m_rsiCrossLevel && rsi1 < rsi2);
-
-      return false;
-   }
-
-   bool IsCandleConfirmed(const ENUM_SIGNAL direction,
-                          CIndicatorManager *indicators) const
-   {
-      if(!m_useCandleConfirm)
-         return true;
-
-      double open1 = 0.0, high1 = 0.0, low1 = 0.0, close1 = 0.0;
-      double open2 = 0.0, high2 = 0.0, low2 = 0.0, close2 = 0.0;
-
-      if(!indicators.GetBarOHLC(1, open1, high1, low1, close1) ||
-         !indicators.GetBarOHLC(2, open2, high2, low2, close2))
-         return false;
-
-      if(direction == SIGNAL_BUY)
-         return (close1 > open1 && close1 > high2);
-
-      if(direction == SIGNAL_SELL)
-         return (close1 < open1 && close1 < low2);
-
-      return false;
    }
 
    ENUM_SIGNAL TryConfirmEntry(CIndicatorManager *indicators)
@@ -849,33 +880,51 @@ public:
          return SIGNAL_NONE;
       }
 
-      if(!IsPullbackToEMA(direction, indicators))
+      if(!m_zoneTouched)
       {
-         if(m_logger != NULL)
-            m_logger.Debug("Pullback not yet complete.");
+         if(!IsZoneTouched(direction, indicators))
+         {
+            if(m_logger != NULL)
+               m_logger.Debug("Pullback zone not yet touched.");
+            return SIGNAL_NONE;
+         }
+
+         m_zoneTouched          = true;
+         m_confirmBarsRemaining = m_confirmWindowBars;
+         UpdateConfirmFlags(direction, indicators);
+
+         if(IsFullyConfirmed())
+         {
+            if(m_logger != NULL)
+               m_logger.Info(StringFormat("Pullback entry confirmed | Direction=%s (same bar as touch)",
+                                          (direction == SIGNAL_BUY ? "BUY" : "SELL")));
+            Reset();
+            return direction;
+         }
+
          return SIGNAL_NONE;
       }
 
-      if(!IsRSIMomentumCross(direction, indicators))
+      UpdateConfirmFlags(direction, indicators);
+
+      if(IsFullyConfirmed())
       {
          if(m_logger != NULL)
-            m_logger.Debug("RSI momentum cross not confirmed.");
-         return SIGNAL_NONE;
+            m_logger.Info(StringFormat("Pullback entry confirmed | Direction=%s",
+                                       (direction == SIGNAL_BUY ? "BUY" : "SELL")));
+         Reset();
+         return direction;
       }
 
-      if(!IsCandleConfirmed(direction, indicators))
+      m_confirmBarsRemaining--;
+      if(m_confirmBarsRemaining <= 0)
       {
          if(m_logger != NULL)
-            m_logger.Debug("Candle confirmation failed.");
-         return SIGNAL_NONE;
+            m_logger.Debug("Confirmation window expired - waiting for new EMA zone touch.");
+         ResetConfirmState();
       }
 
-      if(m_logger != NULL)
-         m_logger.Info(StringFormat("Pullback entry confirmed | Direction=%s",
-                                    (direction == SIGNAL_BUY ? "BUY" : "SELL")));
-
-      Reset();
-      return direction;
+      return SIGNAL_NONE;
    }
 };
 
@@ -1678,7 +1727,7 @@ private:
       const bool coreFilters   = m_signals.DiagCoreFilters();
       const bool armedValid    = m_signals.DiagValidateArmed(direction);
       const bool pullback      = m_pullback.CheckPullback(direction, m_indicators);
-      const bool rsiCross      = m_pullback.CheckRSICross(direction, m_indicators);
+      const bool rsiMomentum   = m_pullback.CheckRSIMomentum(direction, m_indicators);
       const bool candleConfirm = m_pullback.CheckCandleConfirm(direction, m_indicators);
 
       const datetime barTime = iTime(m_symbol, m_timeframe, 1);
@@ -1695,8 +1744,10 @@ private:
       m_logger.Diag(StringFormat("ADX                 = %s", BoolStr(adx)));
       m_logger.Diag(StringFormat("ATR Filter          = %s", BoolStr(atrFilter)));
       m_logger.Diag(StringFormat("Pullback            = %s", BoolStr(pullback)));
-      m_logger.Diag(StringFormat("RSI Cross           = %s", BoolStr(rsiCross)));
-      m_logger.Diag(StringFormat("Candle Confirmation = %s", BoolStr(candleConfirm)));
+      m_logger.Diag(StringFormat("RSI Momentum        = %s", BoolStr(rsiMomentum)));
+      m_logger.Diag(StringFormat("%s = %s",
+                                 (direction == SIGNAL_BUY ? "Bullish Candle     " : "Bearish Candle     "),
+                                 BoolStr(candleConfirm)));
       m_logger.Diag(StringFormat("Range Filter        = %s", BoolStr(rangeFilter)));
       m_logger.Diag(StringFormat("Core Filters        = %s", BoolStr(coreFilters)));
       m_logger.Diag(StringFormat("Armed Validation    = %s", BoolStr(armedValid)));
@@ -1715,7 +1766,7 @@ private:
       {
          AppendBlocker(blockers, "Armed Validation", armedValid);
          AppendBlocker(blockers, "Pullback", pullback);
-         AppendBlocker(blockers, "RSI Cross", rsiCross);
+         AppendBlocker(blockers, "RSI Momentum", rsiMomentum);
          AppendBlocker(blockers, "Candle Confirmation", candleConfirm);
       }
 
@@ -1760,9 +1811,9 @@ private:
             m_logger.Diag("FAIL: Pullback to EMA zone not complete.");
             m_pullback.LogPullbackDetail(direction, m_indicators);
          }
-         if(!rsiCross)
+         if(!rsiMomentum)
          {
-            m_logger.Diag("FAIL: RSI momentum cross not detected.");
+            m_logger.Diag("FAIL: RSI momentum not confirmed.");
             m_pullback.LogRSIDetail(direction, m_indicators);
          }
          if(!candleConfirm)
@@ -2266,7 +2317,7 @@ public:
       logger.Info(StringFormat("Reject ATR:        %d", rejectATR));
       logger.Info(StringFormat("Reject Range:      %d", rejectRange));
       logger.Info(StringFormat("Reject Pullback:   %d", rejectPullback));
-      logger.Info(StringFormat("Reject RSI:        %d", rejectRSI));
+      logger.Info(StringFormat("Reject RSI Momentum:   %d", rejectRSI));
       logger.Info(StringFormat("Reject Candle:     %d", rejectCandle));
       logger.Info("==========================");
    }
@@ -2341,6 +2392,16 @@ private:
          m_logger.Error("Pullback max bars must be greater than zero.");
          return false;
       }
+      if(InpConfirmWindowBars <= 0)
+      {
+         m_logger.Error("Confirmation window bars must be greater than zero.");
+         return false;
+      }
+      if(InpRSIBuyMin <= 0.0 || InpRSISellMax <= 0.0 || InpRSIBuyMin <= InpRSISellMax)
+      {
+         m_logger.Error("Invalid RSI momentum levels: BuyMin must be greater than SellMax.");
+         return false;
+      }
       if(InpATRAvgPeriod <= 0 || InpADXAvgPeriod <= 0)
       {
          m_logger.Error("Average periods must be greater than zero.");
@@ -2395,17 +2456,24 @@ private:
       checks.atr      = m_signals.DiagATRFilter();
       checks.range    = m_signals.DiagRangeFilter();
       checks.pullback = m_pullback.CheckPullback(direction, GetPointer(m_indicators));
-      checks.rsi      = m_pullback.CheckRSICross(direction, GetPointer(m_indicators));
+      checks.rsi      = m_pullback.CheckRSIMomentum(direction, GetPointer(m_indicators));
       checks.candle   = m_pullback.CheckCandleConfirm(direction, GetPointer(m_indicators));
       return checks;
    }
 
-   void RecordCheckCounters(const SDirectionChecks &checks, const ENUM_SIGNAL direction)
+   bool IsSetupReady(const SDirectionChecks &checks) const
    {
-      if(checks.bos)
-         m_stats.bosFound++;
-      else
-         m_stats.rejectBOS++;
+      return (checks.bos && checks.htf && checks.ltf &&
+              checks.adx && checks.atr && checks.range);
+   }
+
+   void RecordSetupCandidateStats(const ENUM_SIGNAL direction,
+                                  const SDirectionChecks &checks)
+   {
+      if(direction == SIGNAL_NONE || !checks.bos)
+         return;
+
+      m_stats.bosFound++;
 
       if(checks.htf)
          m_stats.htfPassed++;
@@ -2431,6 +2499,13 @@ private:
          m_stats.rangePassed++;
       else
          m_stats.rejectRange++;
+   }
+
+   void RecordEntryAttemptStats(const ENUM_SIGNAL direction,
+                                const SDirectionChecks &checks)
+   {
+      if(direction == SIGNAL_NONE)
+         return;
 
       if(checks.pullback)
          m_stats.pullbacksFound++;
@@ -2446,16 +2521,6 @@ private:
          m_stats.candlePassed++;
       else
          m_stats.rejectCandle++;
-
-      const bool setupReady = (checks.bos && checks.htf && checks.ltf &&
-                               checks.adx && checks.atr && checks.range);
-      if(setupReady)
-      {
-         if(direction == SIGNAL_BUY)
-            m_stats.buySetups++;
-         else if(direction == SIGNAL_SELL)
-            m_stats.sellSetups++;
-      }
    }
 
    void LogSetupRejection(const string sideLabel, const SDirectionChecks &checks)
@@ -2495,7 +2560,8 @@ private:
       }
    }
 
-   void LogEntryRejection(const string sideLabel, const SDirectionChecks &checks)
+   void LogEntryRejection(const string sideLabel, const ENUM_SIGNAL direction,
+                          const SDirectionChecks &checks)
    {
       if(!m_pipelineLog)
          return;
@@ -2507,12 +2573,14 @@ private:
       }
       if(!checks.rsi)
       {
-         m_logger.Pipe(sideLabel + " Rejected because RSI Cross missing.");
+         m_logger.Pipe(sideLabel + " Rejected because RSI Momentum missing.");
          return;
       }
       if(!checks.candle)
       {
-         m_logger.Pipe(sideLabel + " Rejected because Candle Confirmation failed.");
+         m_logger.Pipe(sideLabel + (direction == SIGNAL_BUY ?
+                        " Rejected because Bullish Candle confirmation failed." :
+                        " Rejected because Bearish Candle confirmation failed."));
       }
    }
 
@@ -2534,21 +2602,20 @@ private:
       m_logger.Pipe(CheckLine("ATR", checks.atr));
       m_logger.Pipe(CheckLine("Range Filter", checks.range));
       m_logger.Pipe(CheckLine("Pullback", checks.pullback));
-      m_logger.Pipe(CheckLine("RSI Cross", checks.rsi));
-      m_logger.Pipe(CheckLine("Candle Confirm", checks.candle));
-
-      RecordCheckCounters(checks, direction);
+      m_logger.Pipe(CheckLine("RSI Momentum", checks.rsi));
+      m_logger.Pipe(CheckLine((direction == SIGNAL_BUY ? "Bullish Candle" : "Bearish Candle"), checks.candle));
 
       if(!logRejections)
          return;
 
       if(entryPhase)
-         LogEntryRejection(sideLabel, checks);
-      else
+         LogEntryRejection(sideLabel, direction, checks);
+      else if(checks.bos)
          LogSetupRejection(sideLabel, checks);
    }
 
-   void PrintBarDebugReport(const datetime barTime, const ENUM_SIGNAL armedDir)
+   void PrintBarDebugReport(const datetime barTime, const bool entryPhase,
+                            const ENUM_SIGNAL armedDir)
    {
       if(!m_pipelineLog)
          return;
@@ -2558,11 +2625,13 @@ private:
       m_logger.Pipe("=================================================");
       m_logger.Pipe("BAR: " + TimeToString(barTime, TIME_DATE | TIME_MINUTES));
 
-      PrintDirectionBlock("BUY", SIGNAL_BUY, true, false);
-      PrintDirectionBlock("SELL", SIGNAL_SELL, true, false);
-
-      if(armedDir != SIGNAL_NONE)
-         LogEntryRejection(SignalLabel(armedDir), CollectChecks(armedDir));
+      if(entryPhase && armedDir != SIGNAL_NONE)
+         PrintDirectionBlock(SignalLabel(armedDir), armedDir, false, true);
+      else
+      {
+         PrintDirectionBlock("BUY", SIGNAL_BUY, false, false);
+         PrintDirectionBlock("SELL", SIGNAL_SELL, false, false);
+      }
 
       m_logger.Pipe("=================================================");
    }
@@ -2606,7 +2675,7 @@ public:
       m_stats.Reset();
 
       m_logger.Init(InpLogLevel, "ProEA");
-      m_logger.Info("Initializing Expert Advisor v2.03...");
+      m_logger.Info("Initializing Expert Advisor v2.05...");
 
       if(!ValidateInputs())
          return false;
@@ -2628,7 +2697,8 @@ public:
                      InpATRMinRatio, InpATRMaxRatio, InpMinEMASeparationATR);
 
       m_pullback.Init(GetPointer(m_logger), InpPullbackMaxBars, InpPullbackATRZone,
-                      InpRSICrossLevel, InpUseCandleConfirm);
+                      InpRSIBuyMin, InpRSISellMax, InpConfirmWindowBars,
+                      InpUseCandleConfirm);
 
       m_exits.Init(GetPointer(m_logger), InpMagicNumber,
                    GetPointer(m_indicators), GetPointer(m_structure),
@@ -2726,52 +2796,37 @@ public:
 
       PrintBarDebugReport(barTime, entryPhase, armedDir);
 
-      if(m_positions.HasOpenPosition())
-      {
-         RejectAndLog("Position already open for this symbol", m_stats.rejectPosition);
-         return;
-      }
-
-      if(m_lastExitBarTime == m_lastBarTime)
-      {
-         RejectAndLog("Exit occurred on this bar - re-entry blocked", m_stats.rejectExitBar);
-         return;
-      }
-
       const bool spreadOk  = m_filters.IsSpreadAcceptable();
       const bool sessionOk = m_filters.IsWithinSession();
-
-      if(!spreadOk)
-      {
-         RejectAndLog("Spread filter blocked entry", m_stats.rejectSpread);
-         return;
-      }
-      if(!sessionOk)
-      {
-         RejectAndLog("Session filter blocked entry", m_stats.rejectSession);
-         return;
-      }
+      const bool exitBarBlocked = (m_lastExitBarTime == m_lastBarTime);
+      const bool canAttemptEntry = (!m_positions.HasOpenPosition() &&
+                                    !exitBarBlocked && spreadOk && sessionOk);
 
       ENUM_SIGNAL signal = SIGNAL_NONE;
 
+      // Armed state machine: always advance timer; confirm only when entry filters allow
       if(m_pullback.GetState() != SETUP_NONE)
       {
-         const int barsBefore = m_pullback.GetBarsRemaining();
-         m_pullback.DecrementBar();
-
-         if(m_pullback.GetState() == SETUP_NONE && barsBefore > 0)
-         {
-            RejectAndLog(StringFormat("Pullback setup expired on bar %s",
-                                      TimeToString(barTime, TIME_DATE | TIME_MINUTES)),
-                         m_stats.rejectPullbackExpired);
-         }
-
          const ENUM_SIGNAL confirmDir = GetArmedDirection();
-         if(confirmDir != SIGNAL_NONE && m_pullback.GetState() != SETUP_NONE)
+         const int barsBefore         = m_pullback.GetBarsRemaining();
+
+         if(confirmDir != SIGNAL_NONE && canAttemptEntry)
          {
             const bool armedValid = m_signals.ValidateArmedSetup(confirmDir);
             if(armedValid)
+            {
                signal = m_pullback.TryConfirmEntry(GetPointer(m_indicators));
+
+               const SDirectionChecks entryChecks = CollectChecks(confirmDir);
+               RecordEntryAttemptStats(confirmDir, entryChecks);
+
+               if(m_pipelineLog)
+               {
+                  PrintDirectionBlock(SignalLabel(confirmDir), confirmDir, true, true);
+                  if(signal == SIGNAL_NONE)
+                     LogEntryRejection(SignalLabel(confirmDir), confirmDir, entryChecks);
+               }
+            }
             else
             {
                m_pullback.Reset();
@@ -2779,26 +2834,79 @@ public:
                                          SignalLabel(confirmDir)),
                             m_stats.rejectArmedValidation);
             }
+         }
 
-            if(signal == SIGNAL_NONE && armedValid)
+         if(m_pullback.GetState() != SETUP_NONE)
+         {
+            m_pullback.DecrementBar();
+
+            if(m_pullback.GetState() == SETUP_NONE && barsBefore > 0)
             {
-               const SDirectionChecks checks = CollectChecks(confirmDir);
-               LogEntryRejection(SignalLabel(confirmDir), checks);
+               RejectAndLog(StringFormat("Pullback setup expired on bar %s",
+                                         TimeToString(barTime, TIME_DATE | TIME_MINUTES)),
+                            m_stats.rejectPullbackExpired);
             }
          }
       }
 
+      if(m_positions.HasOpenPosition())
+      {
+         RejectAndLog("Position already open for this symbol", m_stats.rejectPosition);
+         return;
+      }
+
+      if(exitBarBlocked)
+      {
+         RejectAndLog("Exit occurred on this bar - re-entry blocked", m_stats.rejectExitBar);
+         if(signal == SIGNAL_NONE)
+            return;
+      }
+
+      if(!spreadOk)
+      {
+         RejectAndLog("Spread filter blocked entry", m_stats.rejectSpread);
+         if(signal == SIGNAL_NONE)
+            return;
+      }
+      if(!sessionOk)
+      {
+         RejectAndLog("Session filter blocked entry", m_stats.rejectSession);
+         if(signal == SIGNAL_NONE)
+            return;
+      }
+
       if(signal == SIGNAL_NONE && m_pullback.GetState() == SETUP_NONE)
       {
+         const SDirectionChecks buyChecks  = CollectChecks(SIGNAL_BUY);
+         const SDirectionChecks sellChecks = CollectChecks(SIGNAL_SELL);
+
+         if(buyChecks.bos)
+            RecordSetupCandidateStats(SIGNAL_BUY, buyChecks);
+         if(sellChecks.bos)
+            RecordSetupCandidateStats(SIGNAL_SELL, sellChecks);
+
          const ENUM_SIGNAL setup = m_signals.EvaluateSetup();
          if(setup != SIGNAL_NONE)
          {
+            if(setup == SIGNAL_BUY)
+               m_stats.buySetups++;
+            else if(setup == SIGNAL_SELL)
+               m_stats.sellSetups++;
+
             m_pullback.ArmSetup(setup);
             m_stats.setupsArmed++;
+
             if(m_pipelineLog)
                m_logger.Pipe(StringFormat("SETUP ARMED: %s on bar %s",
                                           SignalLabel(setup),
                                           TimeToString(barTime, TIME_DATE | TIME_MINUTES)));
+         }
+         else if(m_pipelineLog)
+         {
+            if(buyChecks.bos)
+               LogSetupRejection("BUY", buyChecks);
+            if(sellChecks.bos)
+               LogSetupRejection("SELL", sellChecks);
          }
       }
 
