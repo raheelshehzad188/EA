@@ -1281,212 +1281,6 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| CSignalDiagnostics - Per-bar pipeline report                      |
-//+------------------------------------------------------------------+
-class CSignalDiagnostics
-{
-private:
-   CLogger               *m_logger;
-   CIndicatorManager     *m_indicators;
-   CMarketStructure      *m_structure;
-   CSignalEngine         *m_signals;
-   CPullbackEntryManager *m_pullback;
-   CFilterManager        *m_filters;
-   string                 m_symbol;
-   ENUM_TIMEFRAMES        m_timeframe;
-   bool                   m_enabled;
-
-   string BoolStr(const bool value) const
-   {
-      return value ? "TRUE" : "FALSE";
-   }
-
-   string DirectionStr(const ENUM_SIGNAL direction) const
-   {
-      if(direction == SIGNAL_BUY)  return "BUY";
-      if(direction == SIGNAL_SELL) return "SELL";
-      return "NONE";
-   }
-
-   void AppendBlocker(string &blockers, const string name, const bool passed) const
-   {
-      if(passed)
-         return;
-      if(blockers != "")
-         blockers += ", ";
-      blockers += name;
-   }
-
-   void PrintDirectionReport(const ENUM_SIGNAL direction,
-                             const string mode,
-                             const int barsRemaining) const
-   {
-      if(m_logger == NULL || m_signals == NULL || m_pullback == NULL || m_indicators == NULL)
-         return;
-
-      const bool bos           = m_signals.DiagBOS(direction);
-      const bool htfTrend      = m_signals.DiagHTFTrend(direction);
-      const bool ltfTrend      = m_signals.DiagLTFTrend(direction);
-      const bool adx           = m_signals.DiagADXFilter();
-      const bool atrFilter     = m_signals.DiagATRFilter();
-      const bool rangeFilter   = m_signals.DiagRangeFilter();
-      const bool coreFilters   = m_signals.DiagCoreFilters();
-      const bool armedValid    = m_signals.DiagValidateArmed(direction);
-      const bool pullback      = m_pullback.CheckPullback(direction, m_indicators);
-      const bool rsiCross      = m_pullback.CheckRSICross(direction, m_indicators);
-      const bool candleConfirm = m_pullback.CheckCandleConfirm(direction, m_indicators);
-
-      const datetime barTime = iTime(m_symbol, m_timeframe, 1);
-      string header = StringFormat("=== Bar %s | Mode=%s | Dir=%s",
-                                   TimeToString(barTime, TIME_DATE | TIME_MINUTES),
-                                   mode, DirectionStr(direction));
-      if(barsRemaining > 0)
-         header += StringFormat(" | BarsLeft=%d", barsRemaining);
-
-      m_logger.Diag(header);
-      m_logger.Diag(StringFormat("BOS                 = %s", BoolStr(bos)));
-      m_logger.Diag(StringFormat("HTF Trend           = %s", BoolStr(htfTrend)));
-      m_logger.Diag(StringFormat("LTF Trend           = %s", BoolStr(ltfTrend)));
-      m_logger.Diag(StringFormat("ADX                 = %s", BoolStr(adx)));
-      m_logger.Diag(StringFormat("ATR Filter          = %s", BoolStr(atrFilter)));
-      m_logger.Diag(StringFormat("Pullback            = %s", BoolStr(pullback)));
-      m_logger.Diag(StringFormat("RSI Cross           = %s", BoolStr(rsiCross)));
-      m_logger.Diag(StringFormat("Candle Confirmation = %s", BoolStr(candleConfirm)));
-      m_logger.Diag(StringFormat("Range Filter        = %s", BoolStr(rangeFilter)));
-      m_logger.Diag(StringFormat("Core Filters        = %s", BoolStr(coreFilters)));
-      m_logger.Diag(StringFormat("Armed Validation    = %s", BoolStr(armedValid)));
-
-      string blockers = "";
-      if(StringCompare(mode, "SETUP_SCAN") == 0)
-      {
-         AppendBlocker(blockers, "BOS", bos);
-         AppendBlocker(blockers, "HTF Trend", htfTrend);
-         AppendBlocker(blockers, "LTF Trend", ltfTrend);
-         AppendBlocker(blockers, "ADX", adx);
-         AppendBlocker(blockers, "ATR Filter", atrFilter);
-         AppendBlocker(blockers, "Range Filter", rangeFilter);
-      }
-      else
-      {
-         AppendBlocker(blockers, "Armed Validation", armedValid);
-         AppendBlocker(blockers, "Pullback", pullback);
-         AppendBlocker(blockers, "RSI Cross", rsiCross);
-         AppendBlocker(blockers, "Candle Confirmation", candleConfirm);
-      }
-
-      if(blockers == "")
-         m_logger.Diag("BLOCKERS: none (all checked conditions passed)");
-      else
-         m_logger.Diag("BLOCKERS: " + blockers);
-
-      if(!bos && StringCompare(mode, "SETUP_SCAN") == 0)
-         m_logger.Diag("FAIL: BOS not present for " + DirectionStr(direction) + " setup.");
-      if(!htfTrend)
-      {
-         m_logger.Diag("FAIL: HTF trend not aligned.");
-         m_signals.LogHTFTrendDetail(direction);
-      }
-      if(!ltfTrend)
-      {
-         m_logger.Diag("FAIL: LTF trend not aligned.");
-         m_signals.LogLTFTrendDetail(direction);
-      }
-      if(!adx)
-      {
-         m_logger.Diag("FAIL: ADX filter not passed.");
-         m_signals.LogADXDetail();
-      }
-      if(!atrFilter)
-      {
-         m_logger.Diag("FAIL: ATR volatility filter not passed.");
-         m_signals.LogATRDetail();
-      }
-      if(!rangeFilter)
-      {
-         m_logger.Diag("FAIL: Range filter flagged choppy/ranging market.");
-         m_signals.LogRangeDetail();
-      }
-      if(StringCompare(mode, "ENTRY_CONFIRM") == 0)
-      {
-         if(!armedValid)
-            m_logger.Diag("FAIL: Armed setup invalidated (core + HTF + LTF no longer aligned).");
-         if(!pullback)
-         {
-            m_logger.Diag("FAIL: Pullback to EMA zone not complete.");
-            m_pullback.LogPullbackDetail(direction, m_indicators);
-         }
-         if(!rsiCross)
-         {
-            m_logger.Diag("FAIL: RSI momentum cross not detected.");
-            m_pullback.LogRSIDetail(direction, m_indicators);
-         }
-         if(!candleConfirm)
-         {
-            m_logger.Diag("FAIL: Candle confirmation not met.");
-            m_pullback.LogCandleDetail(direction, m_indicators);
-         }
-      }
-   }
-
-public:
-   CSignalDiagnostics(void) :
-      m_logger(NULL),
-      m_indicators(NULL),
-      m_structure(NULL),
-      m_signals(NULL),
-      m_pullback(NULL),
-      m_filters(NULL),
-      m_symbol(""),
-      m_timeframe(PERIOD_CURRENT),
-      m_enabled(true)
-   {}
-
-   void Init(CLogger *logger, CIndicatorManager *indicators, CMarketStructure *structure,
-             CSignalEngine *signals, CPullbackEntryManager *pullback,
-             CFilterManager *filters, const string symbol,
-             const ENUM_TIMEFRAMES timeframe, const bool enabled)
-   {
-      m_logger     = logger;
-      m_indicators = indicators;
-      m_structure  = structure;
-      m_signals    = signals;
-      m_pullback   = pullback;
-      m_filters    = filters;
-      m_symbol     = symbol;
-      m_timeframe  = timeframe;
-      m_enabled    = enabled;
-   }
-
-   void PrintBarReport(const ENUM_SETUP_STATE setupState,
-                       const ENUM_SIGNAL armedDirection) const
-   {
-      if(!m_enabled || m_logger == NULL)
-         return;
-
-      if(m_filters != NULL)
-      {
-         const bool spreadOk  = m_filters.IsSpreadAcceptable();
-         const bool sessionOk = m_filters.IsWithinSession();
-         m_logger.Diag(StringFormat("Pre-filters | Spread=%s Session=%s",
-                                    BoolStr(spreadOk), BoolStr(sessionOk)));
-         if(!spreadOk)
-            m_logger.Diag("FAIL: Spread filter blocked entry evaluation.");
-         if(!sessionOk)
-            m_logger.Diag("FAIL: Session filter blocked entry evaluation.");
-      }
-
-      if(setupState != SETUP_NONE && armedDirection != SIGNAL_NONE)
-      {
-         PrintDirectionReport(armedDirection, "ENTRY_CONFIRM", m_pullback.GetBarsRemaining());
-         return;
-      }
-
-      PrintDirectionReport(SIGNAL_BUY,  "SETUP_SCAN", 0);
-      PrintDirectionReport(SIGNAL_SELL, "SETUP_SCAN", 0);
-   }
-};
-
-//+------------------------------------------------------------------+
 //| CExitManager - Structure / momentum exit logic                    |
 //| Separate from CPositionManager (trailing / break-even unchanged)  |
 //+------------------------------------------------------------------+
@@ -1822,6 +1616,217 @@ public:
    bool PassAllFilters(void) const
    {
       return IsSpreadAcceptable() && IsWithinSession();
+   }
+};
+
+//+------------------------------------------------------------------+
+//| CSignalDiagnostics - Per-bar pipeline report                      |
+//+------------------------------------------------------------------+
+class CSignalDiagnostics
+{
+private:
+   CLogger               *m_logger;
+   CIndicatorManager     *m_indicators;
+   CMarketStructure      *m_structure;
+   CSignalEngine         *m_signals;
+   CPullbackEntryManager *m_pullback;
+   CFilterManager        *m_filters;
+   string                 m_symbol;
+   ENUM_TIMEFRAMES        m_timeframe;
+   bool                   m_enabled;
+
+   string BoolStr(const bool value) const
+   {
+      return value ? "TRUE" : "FALSE";
+   }
+
+   string DirectionStr(const ENUM_SIGNAL direction) const
+   {
+      if(direction == SIGNAL_BUY)  return "BUY";
+      if(direction == SIGNAL_SELL) return "SELL";
+      return "NONE";
+   }
+
+   void AppendBlocker(string &blockers, const string name, const bool passed) const
+   {
+      if(passed)
+         return;
+      if(blockers != "")
+         blockers += ", ";
+      blockers += name;
+   }
+
+   void PrintDirectionReport(const ENUM_SIGNAL direction,
+                             const string mode,
+                             const int barsRemaining) const
+   {
+      if(m_logger == NULL || m_signals == NULL || m_pullback == NULL || m_indicators == NULL)
+         return;
+
+      const bool bos           = m_signals.DiagBOS(direction);
+      const bool htfTrend      = m_signals.DiagHTFTrend(direction);
+      const bool ltfTrend      = m_signals.DiagLTFTrend(direction);
+      const bool adx           = m_signals.DiagADXFilter();
+      const bool atrFilter     = m_signals.DiagATRFilter();
+      const bool rangeFilter   = m_signals.DiagRangeFilter();
+      const bool coreFilters   = m_signals.DiagCoreFilters();
+      const bool armedValid    = m_signals.DiagValidateArmed(direction);
+      const bool pullback      = m_pullback.CheckPullback(direction, m_indicators);
+      const bool rsiCross      = m_pullback.CheckRSICross(direction, m_indicators);
+      const bool candleConfirm = m_pullback.CheckCandleConfirm(direction, m_indicators);
+
+      const datetime barTime = iTime(m_symbol, m_timeframe, 1);
+      string header = StringFormat("=== Bar %s | Mode=%s | Dir=%s",
+                                   TimeToString(barTime, TIME_DATE | TIME_MINUTES),
+                                   mode, DirectionStr(direction));
+      if(barsRemaining > 0)
+         header += StringFormat(" | BarsLeft=%d", barsRemaining);
+
+      m_logger.Diag(header);
+      m_logger.Diag(StringFormat("BOS                 = %s", BoolStr(bos)));
+      m_logger.Diag(StringFormat("HTF Trend           = %s", BoolStr(htfTrend)));
+      m_logger.Diag(StringFormat("LTF Trend           = %s", BoolStr(ltfTrend)));
+      m_logger.Diag(StringFormat("ADX                 = %s", BoolStr(adx)));
+      m_logger.Diag(StringFormat("ATR Filter          = %s", BoolStr(atrFilter)));
+      m_logger.Diag(StringFormat("Pullback            = %s", BoolStr(pullback)));
+      m_logger.Diag(StringFormat("RSI Cross           = %s", BoolStr(rsiCross)));
+      m_logger.Diag(StringFormat("Candle Confirmation = %s", BoolStr(candleConfirm)));
+      m_logger.Diag(StringFormat("Range Filter        = %s", BoolStr(rangeFilter)));
+      m_logger.Diag(StringFormat("Core Filters        = %s", BoolStr(coreFilters)));
+      m_logger.Diag(StringFormat("Armed Validation    = %s", BoolStr(armedValid)));
+
+      string blockers = "";
+      if(StringCompare(mode, "SETUP_SCAN") == 0)
+      {
+         AppendBlocker(blockers, "BOS", bos);
+         AppendBlocker(blockers, "HTF Trend", htfTrend);
+         AppendBlocker(blockers, "LTF Trend", ltfTrend);
+         AppendBlocker(blockers, "ADX", adx);
+         AppendBlocker(blockers, "ATR Filter", atrFilter);
+         AppendBlocker(blockers, "Range Filter", rangeFilter);
+      }
+      else
+      {
+         AppendBlocker(blockers, "Armed Validation", armedValid);
+         AppendBlocker(blockers, "Pullback", pullback);
+         AppendBlocker(blockers, "RSI Cross", rsiCross);
+         AppendBlocker(blockers, "Candle Confirmation", candleConfirm);
+      }
+
+      if(blockers == "")
+         m_logger.Diag("BLOCKERS: none (all checked conditions passed)");
+      else
+         m_logger.Diag("BLOCKERS: " + blockers);
+
+      if(!bos && StringCompare(mode, "SETUP_SCAN") == 0)
+         m_logger.Diag("FAIL: BOS not present for " + DirectionStr(direction) + " setup.");
+      if(!htfTrend)
+      {
+         m_logger.Diag("FAIL: HTF trend not aligned.");
+         m_signals.LogHTFTrendDetail(direction);
+      }
+      if(!ltfTrend)
+      {
+         m_logger.Diag("FAIL: LTF trend not aligned.");
+         m_signals.LogLTFTrendDetail(direction);
+      }
+      if(!adx)
+      {
+         m_logger.Diag("FAIL: ADX filter not passed.");
+         m_signals.LogADXDetail();
+      }
+      if(!atrFilter)
+      {
+         m_logger.Diag("FAIL: ATR volatility filter not passed.");
+         m_signals.LogATRDetail();
+      }
+      if(!rangeFilter)
+      {
+         m_logger.Diag("FAIL: Range filter flagged choppy/ranging market.");
+         m_signals.LogRangeDetail();
+      }
+      if(StringCompare(mode, "ENTRY_CONFIRM") == 0)
+      {
+         if(!armedValid)
+            m_logger.Diag("FAIL: Armed setup invalidated (core + HTF + LTF no longer aligned).");
+         if(!pullback)
+         {
+            m_logger.Diag("FAIL: Pullback to EMA zone not complete.");
+            m_pullback.LogPullbackDetail(direction, m_indicators);
+         }
+         if(!rsiCross)
+         {
+            m_logger.Diag("FAIL: RSI momentum cross not detected.");
+            m_pullback.LogRSIDetail(direction, m_indicators);
+         }
+         if(!candleConfirm)
+         {
+            m_logger.Diag("FAIL: Candle confirmation not met.");
+            m_pullback.LogCandleDetail(direction, m_indicators);
+         }
+      }
+   }
+
+public:
+   CSignalDiagnostics(void) :
+      m_logger(NULL),
+      m_indicators(NULL),
+      m_structure(NULL),
+      m_signals(NULL),
+      m_pullback(NULL),
+      m_filters(NULL),
+      m_symbol(""),
+      m_timeframe(PERIOD_CURRENT),
+      m_enabled(true)
+   {}
+
+   void Init(CLogger *logger,
+             CIndicatorManager *indicators,
+             CMarketStructure *structure,
+             CSignalEngine *signals,
+             CPullbackEntryManager *pullback,
+             CFilterManager *filters,
+             const string symbol,
+             const ENUM_TIMEFRAMES timeframe,
+             const bool enabled)
+   {
+      m_logger     = logger;
+      m_indicators = indicators;
+      m_structure  = structure;
+      m_signals    = signals;
+      m_pullback   = pullback;
+      m_filters    = filters;
+      m_symbol     = symbol;
+      m_timeframe  = timeframe;
+      m_enabled    = enabled;
+   }
+
+   void PrintBarReport(const ENUM_SETUP_STATE setupState,
+                       const ENUM_SIGNAL armedDirection) const
+   {
+      if(!m_enabled || m_logger == NULL)
+         return;
+
+      if(m_filters != NULL)
+      {
+         const bool spreadOk  = m_filters.IsSpreadAcceptable();
+         const bool sessionOk = m_filters.IsWithinSession();
+         m_logger.Diag(StringFormat("Pre-filters | Spread=%s Session=%s",
+                                    BoolStr(spreadOk), BoolStr(sessionOk)));
+         if(!spreadOk)
+            m_logger.Diag("FAIL: Spread filter blocked entry evaluation.");
+         if(!sessionOk)
+            m_logger.Diag("FAIL: Session filter blocked entry evaluation.");
+      }
+
+      if(setupState != SETUP_NONE && armedDirection != SIGNAL_NONE)
+      {
+         PrintDirectionReport(armedDirection, "ENTRY_CONFIRM", m_pullback.GetBarsRemaining());
+         return;
+      }
+
+      PrintDirectionReport(SIGNAL_BUY,  "SETUP_SCAN", 0);
+      PrintDirectionReport(SIGNAL_SELL, "SETUP_SCAN", 0);
    }
 };
 
@@ -2291,11 +2296,6 @@ public:
          return false;
       }
 
-      m_diagnostics.Init(GetPointer(m_logger), GetPointer(m_indicators),
-                         GetPointer(m_structure), GetPointer(m_signals),
-                         GetPointer(m_pullback), GetPointer(m_filters),
-                         m_symbol, m_timeframe, InpEnableDiagnostics);
-
       m_risk.Init(GetPointer(m_logger), InpLotMode, InpFixedLot, InpRiskPercent);
       if(!m_risk.RefreshSymbol(m_symbol))
       {
@@ -2312,6 +2312,16 @@ public:
          m_logger.Error("Failed to bind filter manager to symbol.");
          return false;
       }
+
+      m_diagnostics.Init(GetPointer(m_logger),
+                         GetPointer(m_indicators),
+                         GetPointer(m_structure),
+                         GetPointer(m_signals),
+                         GetPointer(m_pullback),
+                         GetPointer(m_filters),
+                         m_symbol,
+                         m_timeframe,
+                         InpEnableDiagnostics);
 
       m_positions.Init(GetPointer(m_logger), InpMagicNumber,
                        InpUseTrailingStop, InpTrailStartATR, InpTrailStepATR,
