@@ -3,7 +3,7 @@
 //|                        Professional Trend-Following Expert Advisor|
 //+------------------------------------------------------------------+
 #property copyright "Professional EA"
-#property version   "2.06"
+#property version   "2.07"
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
@@ -934,7 +934,7 @@ public:
 class CSignalEngine
 {
 private:
-   CIndicatorManager  *m_indicators;
+   const CIndicatorManager  *m_indicators;
    CMarketStructure   *m_structure;
    CLogger            *m_logger;
    double              m_adxMin;
@@ -1091,7 +1091,7 @@ public:
       m_minEmaSepAtr(0.35)
    {}
 
-   void Init(CIndicatorManager *indicators, CMarketStructure *structure, CLogger *logger,
+   void Init(const CIndicatorManager *indicators, CMarketStructure *structure, CLogger *logger,
              const double adxMin, const bool useDynamicAdx, const int adxAvgPeriod,
              const bool requireAdxRising, const int atrAvgPeriod,
              const double atrMinRatio, const double atrMaxRatio,
@@ -1344,7 +1344,7 @@ class CExitManager
 private:
    CTrade           m_trade;
    CSymbolInfo      m_symbol;
-   CIndicatorManager *m_indicators;
+   const CIndicatorManager *m_indicators;
    CMarketStructure *m_structure;
    CLogger          *m_logger;
    ulong             m_magic;
@@ -1406,7 +1406,7 @@ public:
       m_useOppositeBosExit(true)
    {}
 
-   void Init(CLogger *logger, const ulong magic, CIndicatorManager *indicators,
+   void Init(CLogger *logger, const ulong magic, const CIndicatorManager *indicators,
              CMarketStructure *structure, const double rsiCrossLevel,
              const bool useStructureExit, const bool useRsiExit,
              const bool useOppositeBosExit)
@@ -1681,7 +1681,7 @@ class CSignalDiagnostics
 {
 private:
    CLogger               *m_logger;
-   CIndicatorManager     *m_indicators;
+   const CIndicatorManager     *m_indicators;
    CMarketStructure      *m_structure;
    CSignalEngine         *m_signals;
    CPullbackEntryManager *m_pullback;
@@ -1838,7 +1838,7 @@ public:
    {}
 
    void Init(CLogger *logger,
-             CIndicatorManager *indicators,
+             const CIndicatorManager *indicators,
              CMarketStructure *structure,
              CSignalEngine *signals,
              CPullbackEntryManager *pullback,
@@ -2675,7 +2675,7 @@ public:
       m_stats.Reset();
 
       m_logger.Init(InpLogLevel, "ProEA");
-      m_logger.Info("Initializing Expert Advisor v2.06...");
+      m_logger.Info("Initializing Expert Advisor v2.07...");
 
       if(!ValidateInputs())
          return false;
