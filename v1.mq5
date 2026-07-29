@@ -3,7 +3,7 @@
 //|                        Professional Trend-Following Expert Advisor|
 //+------------------------------------------------------------------+
 #property copyright "Professional EA"
-#property version   "2.01"
+#property version   "2.03"
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
@@ -141,6 +141,7 @@ input int            InpBreakEvenOffsetPoints = 5;         // Break-even offset 
 input group "=== Logging ==="
 input ENUM_LOG_LEVEL InpLogLevel           = LOG_LEVEL_INFO; // Log verbosity
 input bool           InpEnableDiagnostics  = true;         // Per-bar signal pipeline report
+input bool           InpEnablePipelineLog    = true;         // [PASS/FAIL] entry pipeline instrumentation
 
 //+------------------------------------------------------------------+
 //| CLogger - Centralized logging                                     |
@@ -180,6 +181,11 @@ public:
    void Diag(const string message) const
    {
       Print(m_prefix, " [DIAG]  ", message);
+   }
+
+   void Pipe(const string message) const
+   {
+      Print(m_prefix, " [PIPE]  ", message);
    }
 };
 
@@ -2140,6 +2146,133 @@ public:
 };
 
 //+------------------------------------------------------------------+
+//| SDirectionChecks - Snapshot of one direction's filter states      |
+//+------------------------------------------------------------------+
+struct SDirectionChecks
+{
+   bool bos;
+   bool htf;
+   bool ltf;
+   bool adx;
+   bool atr;
+   bool range;
+   bool pullback;
+   bool rsi;
+   bool candle;
+};
+
+//+------------------------------------------------------------------+
+//| CPipelineStats - Backtest entry pipeline counters                  |
+//+------------------------------------------------------------------+
+class CPipelineStats
+{
+public:
+   int barsChecked;
+   int buySetups;
+   int sellSetups;
+   int bosFound;
+   int htfPassed;
+   int ltfPassed;
+   int adxPassed;
+   int atrPassed;
+   int rangePassed;
+   int pullbacksFound;
+   int rsiPassed;
+   int candlePassed;
+   int tradesExecuted;
+   int rejectBOS;
+   int rejectHTF;
+   int rejectLTF;
+   int rejectADX;
+   int rejectATR;
+   int rejectRange;
+   int rejectPullback;
+   int rejectRSI;
+   int rejectCandle;
+   int setupsArmed;
+   int rejectSpread;
+   int rejectSession;
+   int rejectRisk;
+   int rejectPosition;
+   int rejectArmedValidation;
+   int rejectExitBar;
+   int rejectPullbackExpired;
+   int rejectOrderSend;
+
+   CPipelineStats(void) { Reset(); }
+
+   void Reset(void)
+   {
+      barsChecked           = 0;
+      buySetups             = 0;
+      sellSetups            = 0;
+      bosFound              = 0;
+      htfPassed             = 0;
+      ltfPassed             = 0;
+      adxPassed             = 0;
+      atrPassed             = 0;
+      rangePassed           = 0;
+      pullbacksFound        = 0;
+      rsiPassed             = 0;
+      candlePassed          = 0;
+      tradesExecuted        = 0;
+      rejectBOS             = 0;
+      rejectHTF             = 0;
+      rejectLTF             = 0;
+      rejectADX             = 0;
+      rejectATR             = 0;
+      rejectRange           = 0;
+      rejectPullback        = 0;
+      rejectRSI             = 0;
+      rejectCandle          = 0;
+      setupsArmed           = 0;
+      rejectSpread          = 0;
+      rejectSession         = 0;
+      rejectRisk            = 0;
+      rejectPosition        = 0;
+      rejectArmedValidation = 0;
+      rejectExitBar         = 0;
+      rejectPullbackExpired = 0;
+      rejectOrderSend       = 0;
+   }
+
+   void PrintFinalReport(CLogger *logger) const
+   {
+      if(logger == NULL)
+         return;
+
+      logger.Info("==========================");
+      logger.Info("FINAL DEBUG REPORT");
+      logger.Info("==========================");
+      logger.Info(StringFormat("Bars Checked:      %d", barsChecked));
+      logger.Info(StringFormat("BUY Setups:        %d", buySetups));
+      logger.Info(StringFormat("SELL Setups:       %d", sellSetups));
+      logger.Info(StringFormat("BOS Found:         %d", bosFound));
+      logger.Info(StringFormat("HTF Passed:        %d", htfPassed));
+      logger.Info(StringFormat("LTF Passed:        %d", ltfPassed));
+      logger.Info(StringFormat("ADX Passed:        %d", adxPassed));
+      logger.Info(StringFormat("ATR Passed:        %d", atrPassed));
+      logger.Info(StringFormat("Range Passed:      %d", rangePassed));
+      logger.Info(StringFormat("Pullbacks Found:   %d", pullbacksFound));
+      logger.Info(StringFormat("RSI Passed:        %d", rsiPassed));
+      logger.Info(StringFormat("Candle Passed:     %d", candlePassed));
+      logger.Info(StringFormat("Trades Executed:   %d", tradesExecuted));
+      logger.Info(StringFormat("Setups Armed:      %d", setupsArmed));
+      logger.Info("");
+      logger.Info(StringFormat("Reject BOS:        %d", rejectBOS));
+      logger.Info(StringFormat("Reject HTF:        %d", rejectHTF));
+      logger.Info(StringFormat("Reject LTF:        %d", rejectLTF));
+      logger.Info(StringFormat("Reject ADX:        %d", rejectADX));
+      logger.Info(StringFormat("Reject ATR:        %d", rejectATR));
+      logger.Info(StringFormat("Reject Range:      %d", rejectRange));
+      logger.Info(StringFormat("Reject Pullback:   %d", rejectPullback));
+      logger.Info(StringFormat("Reject RSI:        %d", rejectRSI));
+      logger.Info(StringFormat("Reject Candle:     %d", rejectCandle));
+      logger.Info("==========================");
+   }
+};
+
+//+------------------------------------------------------------------+
 //| CExpertAdvisor - Main orchestrator                                |
 //+------------------------------------------------------------------+
 class CExpertAdvisor
@@ -2156,6 +2289,9 @@ private:
    CFilterManager        m_filters;
    CPositionManager      m_positions;
    CTradeExecutor        m_executor;
+
+   CPipelineStats        m_stats;
+   bool                  m_pipelineLog;
 
    string             m_symbol;
    ENUM_TIMEFRAMES    m_timeframe;
@@ -2233,6 +2369,211 @@ private:
       return true;
    }
 
+   string SignalLabel(const ENUM_SIGNAL direction) const
+   {
+      if(direction == SIGNAL_BUY)
+         return "BUY";
+      if(direction == SIGNAL_SELL)
+         return "SELL";
+      return "NONE";
+   }
+
+   string CheckLine(const string name, const bool passed) const
+   {
+      string padding = "....................";
+      const int dotsNeeded = MathMax(1, 20 - StringLen(name));
+      return name + StringSubstr(padding, 0, dotsNeeded) + " " + (passed ? "PASS" : "FAIL");
+   }
+
+   SDirectionChecks CollectChecks(const ENUM_SIGNAL direction) const
+   {
+      SDirectionChecks checks;
+      checks.bos      = m_signals.DiagBOS(direction);
+      checks.htf      = m_signals.DiagHTFTrend(direction);
+      checks.ltf      = m_signals.DiagLTFTrend(direction);
+      checks.adx      = m_signals.DiagADXFilter();
+      checks.atr      = m_signals.DiagATRFilter();
+      checks.range    = m_signals.DiagRangeFilter();
+      checks.pullback = m_pullback.CheckPullback(direction, GetPointer(m_indicators));
+      checks.rsi      = m_pullback.CheckRSICross(direction, GetPointer(m_indicators));
+      checks.candle   = m_pullback.CheckCandleConfirm(direction, GetPointer(m_indicators));
+      return checks;
+   }
+
+   void RecordCheckCounters(const SDirectionChecks &checks, const ENUM_SIGNAL direction)
+   {
+      if(checks.bos)
+         m_stats.bosFound++;
+      else
+         m_stats.rejectBOS++;
+
+      if(checks.htf)
+         m_stats.htfPassed++;
+      else
+         m_stats.rejectHTF++;
+
+      if(checks.ltf)
+         m_stats.ltfPassed++;
+      else
+         m_stats.rejectLTF++;
+
+      if(checks.adx)
+         m_stats.adxPassed++;
+      else
+         m_stats.rejectADX++;
+
+      if(checks.atr)
+         m_stats.atrPassed++;
+      else
+         m_stats.rejectATR++;
+
+      if(checks.range)
+         m_stats.rangePassed++;
+      else
+         m_stats.rejectRange++;
+
+      if(checks.pullback)
+         m_stats.pullbacksFound++;
+      else
+         m_stats.rejectPullback++;
+
+      if(checks.rsi)
+         m_stats.rsiPassed++;
+      else
+         m_stats.rejectRSI++;
+
+      if(checks.candle)
+         m_stats.candlePassed++;
+      else
+         m_stats.rejectCandle++;
+
+      const bool setupReady = (checks.bos && checks.htf && checks.ltf &&
+                               checks.adx && checks.atr && checks.range);
+      if(setupReady)
+      {
+         if(direction == SIGNAL_BUY)
+            m_stats.buySetups++;
+         else if(direction == SIGNAL_SELL)
+            m_stats.sellSetups++;
+      }
+   }
+
+   void LogSetupRejection(const string sideLabel, const SDirectionChecks &checks)
+   {
+      if(!m_pipelineLog)
+         return;
+
+      if(!checks.bos)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because BOS not found.");
+         return;
+      }
+      if(!checks.htf)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because HTF trend not aligned.");
+         return;
+      }
+      if(!checks.ltf)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because LTF trend not aligned.");
+         return;
+      }
+      if(!checks.adx)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because ADX below threshold.");
+         return;
+      }
+      if(!checks.atr)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because ATR filter failed.");
+         return;
+      }
+      if(!checks.range)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because Range filter failed.");
+         return;
+      }
+   }
+
+   void LogEntryRejection(const string sideLabel, const SDirectionChecks &checks)
+   {
+      if(!m_pipelineLog)
+         return;
+
+      if(!checks.pullback)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because Pullback never happened.");
+         return;
+      }
+      if(!checks.rsi)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because RSI Cross missing.");
+         return;
+      }
+      if(!checks.candle)
+      {
+         m_logger.Pipe(sideLabel + " Rejected because Candle Confirmation failed.");
+      }
+   }
+
+   void PrintDirectionBlock(const string sideLabel, const ENUM_SIGNAL direction,
+                            const bool logRejections, const bool entryPhase)
+   {
+      if(!m_pipelineLog)
+         return;
+
+      const SDirectionChecks checks = CollectChecks(direction);
+
+      m_logger.Pipe("");
+      m_logger.Pipe(sideLabel + " CHECK");
+      m_logger.Pipe("");
+      m_logger.Pipe(CheckLine("BOS", checks.bos));
+      m_logger.Pipe(CheckLine("HTF Trend", checks.htf));
+      m_logger.Pipe(CheckLine("LTF Trend", checks.ltf));
+      m_logger.Pipe(CheckLine("ADX", checks.adx));
+      m_logger.Pipe(CheckLine("ATR", checks.atr));
+      m_logger.Pipe(CheckLine("Range Filter", checks.range));
+      m_logger.Pipe(CheckLine("Pullback", checks.pullback));
+      m_logger.Pipe(CheckLine("RSI Cross", checks.rsi));
+      m_logger.Pipe(CheckLine("Candle Confirm", checks.candle));
+
+      RecordCheckCounters(checks, direction);
+
+      if(!logRejections)
+         return;
+
+      if(entryPhase)
+         LogEntryRejection(sideLabel, checks);
+      else
+         LogSetupRejection(sideLabel, checks);
+   }
+
+   void PrintBarDebugReport(const datetime barTime, const ENUM_SIGNAL armedDir)
+   {
+      if(!m_pipelineLog)
+         return;
+
+      m_stats.barsChecked++;
+
+      m_logger.Pipe("=================================================");
+      m_logger.Pipe("BAR: " + TimeToString(barTime, TIME_DATE | TIME_MINUTES));
+
+      PrintDirectionBlock("BUY", SIGNAL_BUY, true, false);
+      PrintDirectionBlock("SELL", SIGNAL_SELL, true, false);
+
+      if(armedDir != SIGNAL_NONE)
+         LogEntryRejection(SignalLabel(armedDir), CollectChecks(armedDir));
+
+      m_logger.Pipe("=================================================");
+   }
+
+   void RejectAndLog(const string reason, int &counter)
+   {
+      counter++;
+      if(m_pipelineLog)
+         m_logger.Pipe("REJECTED: " + reason);
+   }
+
 public:
    CExpertAdvisor(void) :
       m_symbol(_Symbol),
@@ -2240,7 +2581,8 @@ public:
       m_lastBarTime(0),
       m_lastExitBarTime(0),
       m_slMultiplier(2.0),
-      m_tpMultiplier(3.0)
+      m_tpMultiplier(3.0),
+      m_pipelineLog(true)
    {}
 
    ENUM_SIGNAL GetArmedDirection(void) const
@@ -2260,9 +2602,11 @@ public:
       m_lastExitBarTime = 0;
       m_slMultiplier = InpSL_ATR_Multiplier;
       m_tpMultiplier = InpTP_ATR_Multiplier;
+      m_pipelineLog  = InpEnablePipelineLog;
+      m_stats.Reset();
 
       m_logger.Init(InpLogLevel, "ProEA");
-      m_logger.Info("Initializing Expert Advisor v2.00...");
+      m_logger.Info("Initializing Expert Advisor v2.03...");
 
       if(!ValidateInputs())
          return false;
@@ -2347,6 +2691,7 @@ public:
 
    void Deinit(void)
    {
+      m_stats.PrintFinalReport(GetPointer(m_logger));
       m_pullback.Reset();
       m_indicators.Deinit();
       m_logger.Info("Expert Advisor deinitialized.");
@@ -2356,7 +2701,6 @@ public:
    {
       double atrValue = 0.0;
 
-      // --- Trade management: signal-based exit (every tick) ---
       if(m_exits.CheckAndExit())
       {
          m_lastExitBarTime = iTime(m_symbol, m_timeframe, 0);
@@ -2364,82 +2708,130 @@ public:
          m_logger.Debug("Exit triggered - pullback state cleared.");
       }
 
-      // --- Trade management: trailing stop / break-even (unchanged) ---
       if(m_indicators.GetATR(atrValue) && m_positions.HasOpenPosition())
          m_positions.ManageOpenPosition(atrValue);
 
-      // --- Entry logic: new closed candle only ---
       if(!IsNewBar())
          return;
 
       m_logger.Debug("New bar - evaluating pullback and setup conditions.");
 
-      // --- Per-bar diagnostic (always, before pipeline gates) ---
-      m_diagnostics.PrintBarReport(m_pullback.GetState(), GetArmedDirection());
+      const ENUM_SETUP_STATE setupState = m_pullback.GetState();
+      const ENUM_SIGNAL armedDir        = GetArmedDirection();
+      const datetime barTime            = iTime(m_symbol, m_timeframe, 1);
+      const bool entryPhase             = (setupState != SETUP_NONE && armedDir != SIGNAL_NONE);
+
+      if(InpEnableDiagnostics)
+         m_diagnostics.PrintBarReport(setupState, armedDir);
+
+      PrintBarDebugReport(barTime, entryPhase, armedDir);
 
       if(m_positions.HasOpenPosition())
       {
-         m_logger.Debug("Entry skipped: position already open for this symbol.");
+         RejectAndLog("Position already open for this symbol", m_stats.rejectPosition);
          return;
       }
 
       if(m_lastExitBarTime == m_lastBarTime)
       {
-         m_logger.Debug("Entry skipped: exit occurred on this bar.");
+         RejectAndLog("Exit occurred on this bar - re-entry blocked", m_stats.rejectExitBar);
          return;
       }
 
-      if(!m_filters.PassAllFilters())
+      const bool spreadOk  = m_filters.IsSpreadAcceptable();
+      const bool sessionOk = m_filters.IsWithinSession();
+
+      if(!spreadOk)
+      {
+         RejectAndLog("Spread filter blocked entry", m_stats.rejectSpread);
          return;
+      }
+      if(!sessionOk)
+      {
+         RejectAndLog("Session filter blocked entry", m_stats.rejectSession);
+         return;
+      }
 
       ENUM_SIGNAL signal = SIGNAL_NONE;
 
-      // --- Pullback path: confirm armed setup from prior BOS ---
       if(m_pullback.GetState() != SETUP_NONE)
       {
+         const int barsBefore = m_pullback.GetBarsRemaining();
          m_pullback.DecrementBar();
 
-         const ENUM_SIGNAL armedDir = GetArmedDirection();
-         if(armedDir != SIGNAL_NONE && m_pullback.GetState() != SETUP_NONE)
+         if(m_pullback.GetState() == SETUP_NONE && barsBefore > 0)
          {
-            if(m_signals.ValidateArmedSetup(armedDir))
+            RejectAndLog(StringFormat("Pullback setup expired on bar %s",
+                                      TimeToString(barTime, TIME_DATE | TIME_MINUTES)),
+                         m_stats.rejectPullbackExpired);
+         }
+
+         const ENUM_SIGNAL confirmDir = GetArmedDirection();
+         if(confirmDir != SIGNAL_NONE && m_pullback.GetState() != SETUP_NONE)
+         {
+            const bool armedValid = m_signals.ValidateArmedSetup(confirmDir);
+            if(armedValid)
                signal = m_pullback.TryConfirmEntry(GetPointer(m_indicators));
             else
             {
                m_pullback.Reset();
-               m_logger.Debug("Armed setup invalidated - trend/filter conditions lost.");
+               RejectAndLog(StringFormat("Armed %s setup invalidated - core/HTF/LTF filters lost",
+                                         SignalLabel(confirmDir)),
+                            m_stats.rejectArmedValidation);
+            }
+
+            if(signal == SIGNAL_NONE && armedValid)
+            {
+               const SDirectionChecks checks = CollectChecks(confirmDir);
+               LogEntryRejection(SignalLabel(confirmDir), checks);
             }
          }
       }
 
-      // --- Setup path: arm new BOS setup when no active pullback ---
       if(signal == SIGNAL_NONE && m_pullback.GetState() == SETUP_NONE)
       {
          const ENUM_SIGNAL setup = m_signals.EvaluateSetup();
          if(setup != SIGNAL_NONE)
+         {
             m_pullback.ArmSetup(setup);
+            m_stats.setupsArmed++;
+            if(m_pipelineLog)
+               m_logger.Pipe(StringFormat("SETUP ARMED: %s on bar %s",
+                                          SignalLabel(setup),
+                                          TimeToString(barTime, TIME_DATE | TIME_MINUTES)));
+         }
       }
 
       if(signal == SIGNAL_NONE)
          return;
 
-      m_logger.Info(StringFormat("TRADE OPENING | Direction=%s", (signal == SIGNAL_BUY ? "BUY" : "SELL")));
-
       if(!m_indicators.GetATR(atrValue) || atrValue <= 0.0)
       {
-         m_logger.Error("ATR unavailable for trade execution.");
+         RejectAndLog("ATR unavailable for trade execution", m_stats.rejectRisk);
          return;
       }
 
       const double slDistance = m_slMultiplier * atrValue;
       const double lotSize    = m_risk.CalculateLotSize(slDistance);
+
       if(lotSize <= 0.0)
       {
-         m_logger.Error("Lot size calculation returned zero.");
+         RejectAndLog("Lot size calculation returned zero", m_stats.rejectRisk);
          return;
       }
 
-      m_executor.OpenTrade(signal, lotSize, atrValue);
+      if(m_executor.OpenTrade(signal, lotSize, atrValue))
+      {
+         m_stats.tradesExecuted++;
+         if(m_pipelineLog)
+            m_logger.Pipe(StringFormat("TRADE EXECUTED: %s | Lot=%.2f | Bar=%s",
+                                       SignalLabel(signal), lotSize,
+                                       TimeToString(barTime, TIME_DATE | TIME_MINUTES)));
+      }
+      else
+      {
+         RejectAndLog("Order send failed at broker", m_stats.rejectOrderSend);
+      }
    }
 };
 
