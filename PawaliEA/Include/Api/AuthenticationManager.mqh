@@ -11,7 +11,6 @@
 #include "../Utilities/StringUtils.mqh"
 #include "../Utilities/TimeUtils.mqh"
 #include "../Utilities/FileUtils.mqh"
-#include "../Utilities/SystemMetrics.mqh"
 
 class CPawaliAuthenticationManager : public IPawaliAuthenticatable
 {
@@ -27,12 +26,7 @@ private:
    {
       SPawaliAuthRequest request;
       request.licenseKey    = m_config.licenseKey;
-      request.apiKey        = m_config.apiKey;
-      request.apiSecret     = m_config.apiSecret;
-      request.terminalId    = CPawaliSystemMetrics::GetTerminalId();
       request.accountNumber = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
-      request.broker        = AccountInfoString(ACCOUNT_COMPANY);
-      request.server        = AccountInfoString(ACCOUNT_SERVER);
       request.eaVersion     = m_config.eaVersion;
       return request;
    }
@@ -81,7 +75,7 @@ private:
    bool IsExpiringSoon(void) const
    {
       if(!m_tokens.isValid || m_tokens.expiresAt <= 0)
-         return true;
+         return false;
 
       const datetime refreshAt = m_tokens.expiresAt - m_config.tokenRefreshBufferSec;
       return (TimeCurrent() >= refreshAt);
@@ -115,14 +109,21 @@ public:
       if(m_client == NULL)
          return false;
 
-      if(m_config.licenseKey == "" || m_config.apiKey == "" || m_config.apiSecret == "")
+      if(m_config.baseUrl == "" || m_config.licenseKey == "")
       {
          if(m_logger != NULL)
-            m_logger.ApiError("Authentication credentials are incomplete.");
+            m_logger.ApiError("Authentication credentials are incomplete. Require base URL and license key.");
          return false;
       }
 
       const SPawaliAuthRequest request = BuildRequest();
+      if(request.accountNumber == "" || request.accountNumber == "0")
+      {
+         if(m_logger != NULL)
+            m_logger.ApiError("Authentication credentials are incomplete. Account number unavailable.");
+         return false;
+      }
+
       const string payload = CPawaliJsonSerializer::SerializeAuthRequest(request);
       SPawaliHttpResponse httpResponse;
 
@@ -171,6 +172,10 @@ public:
    {
       if(!m_tokens.isValid || m_tokens.accessToken == "")
          return false;
+
+      if(m_tokens.expiresAt <= 0)
+         return true;
+
       return !CPawaliTimeUtils::IsExpired(m_tokens.expiresAt);
    }
 

@@ -15,12 +15,7 @@ Request:
 ```json
 {
   "license_key": "string",
-  "api_key": "string",
-  "api_secret": "string",
-  "terminal_id": "string",
   "account_number": "string",
-  "broker": "string",
-  "server": "string",
   "ea_version": "1.0.0"
 }
 ```
@@ -30,11 +25,7 @@ Response:
 ```json
 {
   "success": true,
-  "access_token": "string",
-  "refresh_token": "string",
-  "expires_at": 1750000000,
-  "expires_in": 3600,
-  "message": "Authenticated"
+  "token": "string"
 }
 ```
 

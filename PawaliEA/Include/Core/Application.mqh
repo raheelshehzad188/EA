@@ -28,8 +28,6 @@
 input group "=== PawaliEA Enterprise ==="
 input string InpApiBaseUrl        = "http://38.84.24.79:8005/api"; // Laravel API base URL
 input string InpLicenseKey        = "TEST-1234-5678";                         // License key
-input string InpApiKey            = "";                         // API key
-input string InpApiSecret         = "";                         // API secret
 input ulong  InpMagicNumber       = 20260730;                   // Magic number
 input string InpStrategyVersion   = "0.0.0";                    // Strategy version
 input int    InpApiTimeoutMs      = 10000;                      // API timeout (ms)
@@ -77,8 +75,6 @@ private:
       config.maxQueueAttempts       = 10;
       config.maxQueueItems          = 1000;
       config.licenseKey             = InpLicenseKey;
-      config.apiKey                 = InpApiKey;
-      config.apiSecret              = InpApiSecret;
       config.magicNumber            = InpMagicNumber;
       config.strategyVersion        = InpStrategyVersion;
       config.eaVersion              = PAWALI_EA_VERSION;

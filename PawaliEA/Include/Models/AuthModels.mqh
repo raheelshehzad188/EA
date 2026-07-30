@@ -7,12 +7,7 @@
 struct SPawaliAuthRequest
 {
    string licenseKey;
-   string apiKey;
-   string apiSecret;
-   string terminalId;
    string accountNumber;
-   string broker;
-   string server;
    string eaVersion;
 };
 

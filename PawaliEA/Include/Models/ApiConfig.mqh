@@ -17,8 +17,6 @@ struct SPawaliApiConfig
    int    maxQueueAttempts;
    int    maxQueueItems;
    string licenseKey;
-   string apiKey;
-   string apiSecret;
    ulong  magicNumber;
    string strategyVersion;
    string eaVersion;

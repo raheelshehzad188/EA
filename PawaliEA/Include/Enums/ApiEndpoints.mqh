@@ -4,13 +4,13 @@
 #ifndef PAWALI_EA_ENUMS_API_ENDPOINTS_MQH
 #define PAWALI_EA_ENUMS_API_ENDPOINTS_MQH
 
-#define PAWALI_API_AUTH                 "/api/auth"
-#define PAWALI_API_AUTH_REFRESH         "/api/auth/refresh"
-#define PAWALI_API_SETTINGS             "/api/settings"
-#define PAWALI_API_HEARTBEAT            "/api/heartbeat"
-#define PAWALI_API_DECISIONS            "/api/decisions"
-#define PAWALI_API_TRADES               "/api/trades"
-#define PAWALI_API_COMMANDS             "/api/commands"
-#define PAWALI_API_COMMAND_COMPLETE     "/api/commands/%s/complete"
+#define PAWALI_API_AUTH                 "/auth"
+#define PAWALI_API_AUTH_REFRESH         "/auth/refresh"
+#define PAWALI_API_SETTINGS             "/settings"
+#define PAWALI_API_HEARTBEAT            "/heartbeat"
+#define PAWALI_API_DECISIONS            "/decisions"
+#define PAWALI_API_TRADES               "/trades"
+#define PAWALI_API_COMMANDS             "/commands"
+#define PAWALI_API_COMMAND_COMPLETE     "/commands/%s/complete"
 
 #endif

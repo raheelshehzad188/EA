@@ -23,7 +23,15 @@ private:
       string base = m_config.baseUrl;
       if(StringLen(base) > 0 && StringGetCharacter(base, StringLen(base) - 1) == '/')
          base = StringSubstr(base, 0, StringLen(base) - 1);
-      return base + endpoint;
+
+      string path = endpoint;
+      if(StringLen(path) == 0)
+         path = "/";
+
+      if(StringGetCharacter(path, 0) != '/')
+         path = "/" + path;
+
+      return base + path;
    }
 
    string BuildHeaders(const string bearerToken, const string idempotencyKey) const
@@ -36,6 +44,11 @@ private:
       if(idempotencyKey != "")
          headers += "Idempotency-Key: " + idempotencyKey + "\r\n";
       return headers;
+   }
+
+   string MethodLabel(const ENUM_PAWALI_HTTP_METHOD method) const
+   {
+      return (method == PAWALI_HTTP_GET ? "GET" : "POST");
    }
 
    bool ShouldRetry(const SPawaliHttpResponse &response) const
@@ -62,8 +75,8 @@ private:
       response.errorMessage = "";
       response.latencyMs    = 0;
 
-      const string url = BuildUrl(endpoint);
-      string headers   = BuildHeaders(bearerToken, idempotencyKey);
+      const string url     = BuildUrl(endpoint);
+      string headers       = BuildHeaders(bearerToken, idempotencyKey);
       char requestData[];
       char responseData[];
       string responseHeaders;
@@ -72,6 +85,14 @@ private:
          StringToCharArray(payloadJson, requestData, 0, WHOLE_ARRAY, CP_UTF8);
       else
          ArrayResize(requestData, 0);
+
+      if(m_logger != NULL)
+      {
+         m_logger.ApiInfo(StringFormat("WebRequest %s %s payload=%s",
+                                       MethodLabel(method),
+                                       url,
+                                       (payloadJson != "" ? payloadJson : "{}")));
+      }
 
       const uint startMs = GetTickCount();
       ResetLastError();
@@ -88,11 +109,22 @@ private:
       if(httpCode == -1)
       {
          response.errorMessage = StringFormat("WebRequest failed. Error=%d", GetLastError());
+         if(m_logger != NULL)
+            m_logger.ApiError(StringFormat("WebRequest failed url=%s error=%d",
+                                           url, GetLastError()));
          return false;
       }
 
       response.body = CharArrayToString(responseData, 0, WHOLE_ARRAY, CP_UTF8);
       response.success = (httpCode >= 200 && httpCode < 300);
+
+      if(m_logger != NULL)
+      {
+         m_logger.ApiInfo(StringFormat("HTTP %d body=%s",
+                                       httpCode,
+                                       response.body));
+      }
+
       if(!response.success)
          response.errorMessage = StringFormat("HTTP %d: %s", httpCode, response.body);
 

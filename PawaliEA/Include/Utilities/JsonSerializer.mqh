@@ -19,16 +19,9 @@ public:
    static string SerializeAuthRequest(const SPawaliAuthRequest &request)
    {
       return StringFormat(
-         "{\"license_key\":\"%s\",\"api_key\":\"%s\",\"api_secret\":\"%s\","
-         "\"terminal_id\":\"%s\",\"account_number\":\"%s\",\"broker\":\"%s\","
-         "\"server\":\"%s\",\"ea_version\":\"%s\"}",
+         "{\"license_key\":\"%s\",\"account_number\":\"%s\",\"ea_version\":\"%s\"}",
          CPawaliStringUtils::EscapeJson(request.licenseKey),
-         CPawaliStringUtils::EscapeJson(request.apiKey),
-         CPawaliStringUtils::EscapeJson(request.apiSecret),
-         CPawaliStringUtils::EscapeJson(request.terminalId),
          CPawaliStringUtils::EscapeJson(request.accountNumber),
-         CPawaliStringUtils::EscapeJson(request.broker),
-         CPawaliStringUtils::EscapeJson(request.server),
          CPawaliStringUtils::EscapeJson(request.eaVersion));
    }
 
