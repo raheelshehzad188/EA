@@ -27,7 +27,7 @@
 
 input group "=== PawaliEA Enterprise ==="
 input string InpApiBaseUrl        = "http://38.84.24.79:8005/api"; // Laravel API base URL
-input string InpLicenseKey        = "";                         // License key
+input string InpLicenseKey        = "TEST-1234-5678";                         // License key
 input string InpApiKey            = "";                         // API key
 input string InpApiSecret         = "";                         // API secret
 input ulong  InpMagicNumber       = 20260730;                   // Magic number
