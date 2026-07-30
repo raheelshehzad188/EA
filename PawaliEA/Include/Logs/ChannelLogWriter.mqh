@@ -43,7 +43,7 @@ public:
 
    virtual void Write(const ENUM_PAWALI_LOG_CHANNEL channel,
                       const string level,
-                      const string message) override
+                      const string message) const override
    {
       RotateIfNeeded(channel);
 
